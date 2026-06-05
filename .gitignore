@@ -1,0 +1,48 @@
+# Secrets and local environment
+.env
+.env.*
+!.env.example
+
+# Python cache/build artifacts
+__pycache__/
+*.py[cod]
+*.pyo
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+build/
+dist/
+*.egg-info/
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Runtime-generated files
+runs/*
+!runs/.gitkeep
+outputs/*
+!outputs/.gitkeep
+uploads/*
+!uploads/.gitkeep
+benchmark_runs/*
+!benchmark_runs/.gitkeep
+
+# Local logs and scratch files
+*.log
+uvicorn-*.out.log
+uvicorn-*.err.log
+payload.json
+
+# OS/editor files
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+
+.agents/*
+
+PROJECT_PLAN.md
+
+skills-lock.json

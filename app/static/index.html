@@ -1,0 +1,286 @@
+﻿<!doctype html>
+<html lang="ja">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>イラスト間取りAI</title>
+    <meta
+      name="description"
+      content="間取り図を美しい日本風イラストに変換するAIサービス"
+    />
+    <link rel="icon" href="/favicon.ico" />
+    <link rel="stylesheet" href="/assets/styles.css" />
+  </head>
+  <body>
+    <header class="site-header">
+      <div class="nav-shell">
+        <a class="brand" href="#home" aria-label="イラスト間取りAI ホーム">
+          <span class="brand-mark" aria-hidden="true">✦</span>
+          <span>イラスト間取りAI</span>
+        </a>
+        <nav class="nav-links" aria-label="メインナビゲーション">
+          <a class="active" href="#home">ホーム</a>
+          <a href="#generate">生成する</a>
+        </nav>
+        <a class="login-button" href="#generate">
+          <span aria-hidden="true">▦</span>
+          ログイン
+        </a>
+      </div>
+    </header>
+
+    <main id="home">
+      <section class="hero-section">
+        <div class="container hero-grid">
+          <div class="hero-copy reveal">
+            <p class="section-pill">✦ AI搭載・間取り図イラスト変換サービス</p>
+            <h1>
+              <span>間取り図を</span>
+              <strong>美しいイラスト</strong>
+              <span>に変換する</span>
+            </h1>
+            <p class="hero-lead">
+              通常の間取り図と部屋写真をアップロードするだけで、AIが家具・家電を自動検出し、手書き風のカラフルなイラスト間取り図を生成します。
+            </p>
+            <div class="hero-actions">
+              <a class="primary-button" href="#generate">無料で始める <span>→</span></a>
+              <a class="secondary-button" href="#howto">使い方を見る</a>
+            </div>
+            <ul class="trust-list" aria-label="サービスの特徴">
+              <li>◎ 無料でお試し可能</li>
+              <li>◎ 登録30秒</li>
+              <li>◎ 高品質AI生成</li>
+            </ul>
+          </div>
+
+          <div class="hero-visual reveal delay-1" aria-label="間取り図サンプル">
+            <div class="floating-card rating-card">
+              <b>★★★★★ AI自動生成</b>
+              <span>家具・家電を自動配置</span>
+            </div>
+            <div class="floorplan-card">
+              <div class="floorplan-title">イラスト間取り図サンプル</div>
+              <div class="floorplan-image-wrap">
+                <img
+                  src="/assets/images/sample_ai生成_NG.png"
+                  alt="AI生成イラスト間取り図サンプル"
+                  class="floorplan-sample-image"
+                />
+              </div>
+            </div>
+            <div class="floating-card source-card">
+              <span class="mini-plan"></span>
+              <b>元の間取り図</b>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <section class="section features-section" id="features">
+        <div class="container">
+          <div class="section-heading">
+            <p class="section-pill">✦ 主な機能</p>
+            <h2>AIが間取りを<strong>美しく</strong>変換</h2>
+            <p>
+              最先端のAI技術を活用して、通常の間取り図を魅力的なイラストに変換します。
+            </p>
+          </div>
+          <div class="feature-grid">
+            <article class="feature-card">
+              <span class="icon-box">▱</span>
+              <h3>AI間取り解析</h3>
+              <p>最新のLLMが間取り図の壁・ドア・窓・部屋の構造を正確に認識します。</p>
+            </article>
+            <article class="feature-card">
+              <span class="icon-box">✧</span>
+              <h3>家具自動検出</h3>
+              <p>部屋写真からソファ・ベッド・テレビ・冷蔵庫など家具・家電を自動検出。</p>
+            </article>
+            <article class="feature-card">
+              <span class="icon-box">◌</span>
+              <h3>イラスト変換</h3>
+              <p>手書き風・カラフルな仕上がりで、温かみのあるイラスト間取り図を生成。</p>
+            </article>
+          </div>
+        </div>
+      </section>
+
+      <!-- <section class="section gallery-section">
+        <div class="container">
+          <div class="section-heading">
+            <p class="section-pill">▧ サンプルギャラリー</p>
+            <h2>実際の<strong>生成例</strong></h2>
+            <p>部屋写真から家具・家電を自動検出し、イラスト間取り図に反映した例をご覧ください。</p>
+          </div>
+          <div class="gallery-grid">
+            <div>
+              <h3 class="gallery-label">入力: 部屋写真</h3>
+              <div class="photo-grid">
+                <div class="photo-card">部屋写真 1</div>
+                <div class="photo-card">部屋写真 2</div>
+                <div class="photo-card">部屋写真 3</div>
+                <div class="photo-card">部屋写真 4</div>
+              </div>
+            </div>
+            <div>
+              <h3 class="gallery-label">出力: イラスト間取り図</h3>
+              <div class="output-sample-card">
+                <div class="sample-floorplan">
+                  <span>生成されたイラスト間取り図</span>
+                </div>
+              </div>
+              <p class="gallery-note">◎ 家具・家電を自動検出して適切な位置に配置</p>
+            </div>
+          </div>
+        </div>
+      </section> -->
+
+      <section class="section generate-section" id="generate">
+        <div class="container generate-grid">
+          <div class="generate-copy">
+            <p class="section-pill">✦ 生成する</p>
+            <h2>間取り図をアップロード</h2>
+            <p>
+              間取り図をアップロードすると、AIが構造を解析し、家具を配置した日本風イラスト間取り図を生成します。生成後はプレビュー確認とダウンロードができます。
+            </p>
+          </div>
+          <form class="generate-card" id="generateForm">
+            <label class="upload-box">
+              <input id="floorplanInput" type="file" name="floorplan" accept="image/png,image/jpeg,image/webp" required />
+              <span>JPG・PNG・WEBP形式の間取り図を選択</span>
+              <small id="fileName">ファイル未選択</small>
+            </label>
+            <div class="form-row">
+              <label>
+                スタイル
+                <select name="interior_style">
+                  <option value="japanese_natural">Japanese Natural</option>
+                  <option value="scandinavian">Scandinavian</option>
+                  <option value="modern_minimal">Modern Minimal</option>
+                </select>
+              </label>
+              <label>
+                利用者
+                <select name="target_user">
+                  <option value="single_person">一人暮らし</option>
+                  <option value="couple">カップル</option>
+                  <option value="family_with_child">ファミリー</option>
+                </select>
+              </label>
+            </div>
+            <input type="hidden" name="style" value="japanese_watercolor" />
+            <input type="hidden" name="budget_level" value="medium" />
+            <input type="hidden" name="lifestyle" value="work_from_home,likes_plants,needs_storage" />
+            <button class="primary-button full" type="submit">イラスト間取りを生成する</button>
+            <p class="form-status" id="formStatus">API: POST /api/generate</p>
+            <div class="result-panel" id="resultPanel" hidden>
+              <p class="eyebrow">Before / After</p>
+              <div class="result-comparison">
+                <div class="result-card">
+                  <div class="result-card-header">
+                    <h3>入力された間取り図</h3>
+                  </div>
+                  <img id="inputPreviewImage" class="result-image" alt="入力された間取り図" hidden />
+                </div>
+                <div class="result-card">
+                  <div class="result-card-header">
+                    <h3>生成されたイラスト間取り図</h3>
+                    <button id="downloadOutputBtn" class="download-button" type="button" hidden>
+                      ダウンロード
+                    </button>
+                  </div>
+                  <img id="outputImage" class="result-image" alt="生成されたイラスト間取り図" hidden />
+                </div>
+              </div>
+
+              <details class="debug-details">
+                <summary>Debug</summary>
+                <p class="debug-note">以下は内部確認用です。最終生成画像ではありません。</p>
+
+                <div class="result-images">
+                  <figure>
+                    <figcaption>Debug: furniture overlay</figcaption>
+                    <img id="overlayImage" alt="Debug furniture overlay" />
+                  </figure>
+                  <figure>
+                    <figcaption>Debug: overlay with bounding boxes</figcaption>
+                    <img id="overlayDebugImage" alt="Debug overlay with bounding boxes" />
+                  </figure>
+                </div>
+
+                <div class="debug-grid">
+                  <section class="debug-card">
+                    <h4>Provider status</h4>
+                    <dl id="providerStatusList"></dl>
+                  </section>
+                  <section class="debug-card">
+                    <h4>Generation debug</h4>
+                    <dl id="generationDebugList"></dl>
+                  </section>
+                </div>
+
+                <section class="debug-card">
+                  <h4>Furniture plan</h4>
+                  <div id="furniturePlanSummary" class="furniture-summary"></div>
+                </section>
+
+                <section class="debug-card">
+                  <h4>Prompt preview</h4>
+                  <pre id="promptPreview" class="prompt-preview"></pre>
+                </section>
+              </details>
+            </div>
+          </form>
+        </div>
+      </section>
+
+      <section class="section howto-section" id="howto">
+        <div class="container">
+          <div class="section-heading">
+            <p class="section-pill">▱ 使い方</p>
+            <h2><strong>3ステップ</strong>で完成</h2>
+          </div>
+          <div class="steps-grid">
+            <article class="step-card">
+              <span class="step-number">01</span>
+              <span class="icon-box">⇧</span>
+              <h3>間取り図をアップロード</h3>
+              <p>JPG・PNG・PDF形式の間取り図をドラッグ＆ドロップで簡単アップロード。</p>
+            </article>
+            <!-- <article class="step-card">
+              <span class="step-number">02</span>
+              <span class="icon-box">▧</span>
+              <h3>部屋の写真を追加</h3>
+              <p>実際の部屋写真を複数枚アップロード。AIが家具・家電を自動で認識します。</p>
+            </article> -->
+            <article class="step-card">
+              <span class="step-number">02</span>
+              <span class="icon-box">✣</span>
+              <h3>AIが自動生成</h3>
+              <p>LLMが間取りを解析し、家具を最適配置。手書き風イラストに変換します。</p>
+            </article>
+            <article class="step-card">
+              <span class="step-number">03</span>
+              <span class="icon-box">⇩</span>
+              <h3>ダウンロード</h3>
+              <p>生成されたイラスト間取り図をプレビューして、高解像度でダウンロード。</p>
+            </article>
+          </div>
+        </div>
+      </section>
+
+      <section class="cta-band">
+        <div class="container cta-content">
+          <h2>
+            <span>あなたの間取りを</span>
+            <strong>美しいイラスト</strong><span>に</span>
+          </h2>
+          <p>今すぐ無料で試してみましょう。アカウント登録は30秒で完了します。</p>
+          <a class="secondary-on-dark" href="#generate">無料で始める →</a>
+        </div>
+      </section>
+    </main>
+
+    <script src="/assets/app.js" defer></script>
+  </body>
+</html>
