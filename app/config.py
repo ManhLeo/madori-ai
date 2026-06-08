@@ -1,3 +1,5 @@
+import os
+import tempfile
 from functools import lru_cache
 from pathlib import Path
 
@@ -10,6 +12,17 @@ UPLOADS_DIR = BASE_DIR / "uploads"
 OUTPUTS_DIR = BASE_DIR / "outputs"
 RUNS_DIR = BASE_DIR / "runs"
 STATIC_DIR = Path(__file__).resolve().parent / "static"
+VERCEL_RUNTIME_DIR = Path("/tmp/madori-ai")
+
+
+def is_vercel_runtime() -> bool:
+    return os.getenv("VERCEL") == "1" or os.getenv("VERCEL_ENV") is not None
+
+
+def serverless_runtime_dir() -> Path:
+    if os.name == "nt":
+        return Path(tempfile.gettempdir()) / "madori-ai"
+    return VERCEL_RUNTIME_DIR
 
 
 class Settings(BaseSettings):
@@ -59,6 +72,12 @@ class Settings(BaseSettings):
 @lru_cache(maxsize=1)
 def get_settings() -> Settings:
     settings = Settings()
+    if is_vercel_runtime():
+        runtime_dir = serverless_runtime_dir()
+        settings.uploads_dir = runtime_dir / "uploads"
+        settings.outputs_dir = runtime_dir / "outputs"
+        settings.runs_dir = runtime_dir / "runs"
+
     settings.uploads_dir.mkdir(parents=True, exist_ok=True)
     settings.outputs_dir.mkdir(parents=True, exist_ok=True)
     settings.runs_dir.mkdir(parents=True, exist_ok=True)

@@ -113,6 +113,34 @@ http://127.0.0.1:8000
 
 Upload a floorplan and generate. The frontend displays `output.png` only as the final result.
 
+## Deployment Notes
+
+### Vercel / Serverless Runtime
+
+Vercel serverless functions cannot write to the project directory at runtime. When the app detects Vercel with `VERCEL=1` or `VERCEL_ENV` set, it writes runtime files under:
+
+```text
+/tmp/madori-ai/uploads
+/tmp/madori-ai/runs
+/tmp/madori-ai/outputs
+```
+
+When simulating Vercel locally on Windows, the app uses the OS temp directory equivalent, for example `%TEMP%\madori-ai`.
+
+The `/runs` static mount points to the configured runtime `runs_dir`, so generated files can still be opened during the same warm serverless runtime:
+
+```text
+/runs/{run_id}/output.png
+```
+
+Important limitation: `/tmp` is temporary and not persistent. Run files may disappear when the serverless instance is recycled. For real production persistence, upload final outputs to Cloudinary/S3/R2 and store run metadata in a database.
+
+Check deployment/runtime configuration:
+
+```bash
+curl.exe http://127.0.0.1:8000/api/deployment-check
+```
+
 ## API Usage
 
 Generate:
