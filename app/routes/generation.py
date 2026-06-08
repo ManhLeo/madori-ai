@@ -3,7 +3,8 @@ import re
 from pathlib import Path
 
 from fastapi import APIRouter, File, Form, HTTPException, UploadFile
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, Response, StreamingResponse
+import requests
 
 from app.config import get_settings
 from app.schemas import AnalyzeFloorplanResponse, GenerateResponse, UserPreferences
@@ -76,9 +77,11 @@ def inspect_run(run_id: str) -> dict:
     }
 
     prompt_text = _read_text_or_none(run_dir / "prompt.txt")
+    output_url = _read_text_or_none(run_dir / "output_url.txt")
     return {
         "run_id": run_id,
         "files": files,
+        "output_url": output_url,
         "download_url": f"/api/runs/{run_id}/download",
         "generation_debug": _read_json_or_none(run_dir / "generation_debug.json"),
         "provider_status": _read_json_or_none(run_dir / "provider_status.json"),
@@ -93,21 +96,47 @@ def download_run_output(run_id: str) -> FileResponse:
 
 
 @router.head("/runs/{run_id}/download")
-def head_run_output_download(run_id: str) -> FileResponse:
-    return _build_output_download_response(run_id)
-
-
-def _build_output_download_response(run_id: str) -> FileResponse:
+def head_run_output_download(run_id: str) -> Response:
     run_dir = _get_safe_run_dir(run_id)
     output_path = run_dir / "output.png"
-    if not output_path.exists() or not output_path.is_file():
+    if output_path.exists() and output_path.is_file():
+        return _build_output_download_response(run_id)
+
+    output_url = _read_text_or_none(run_dir / "output_url.txt")
+    if not output_url:
         raise HTTPException(status_code=404, detail="generated output image not found")
 
-    return FileResponse(
-        path=output_path,
+    return Response(
         media_type="image/png",
-        filename=f"madori-ai-{run_id}.png",
-        content_disposition_type="attachment",
+        headers={"Content-Disposition": f'attachment; filename="madori-ai-{run_id}.png"'},
+    )
+
+
+def _build_output_download_response(run_id: str) -> FileResponse | StreamingResponse:
+    run_dir = _get_safe_run_dir(run_id)
+    output_path = run_dir / "output.png"
+    if output_path.exists() and output_path.is_file():
+        return FileResponse(
+            path=output_path,
+            media_type="image/png",
+            filename=f"madori-ai-{run_id}.png",
+            content_disposition_type="attachment",
+        )
+
+    output_url = _read_text_or_none(run_dir / "output_url.txt")
+    if not output_url:
+        raise HTTPException(status_code=404, detail="generated output image not found")
+
+    try:
+        response = requests.get(output_url, stream=True, timeout=30)
+        response.raise_for_status()
+    except requests.RequestException as exc:
+        raise HTTPException(status_code=502, detail=f"failed to fetch generated output image: {exc}") from exc
+
+    return StreamingResponse(
+        response.iter_content(chunk_size=1024 * 64),
+        media_type="image/png",
+        headers={"Content-Disposition": f'attachment; filename="madori-ai-{run_id}.png"'},
     )
 
 

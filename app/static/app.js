@@ -11,6 +11,7 @@ const overlayDebugImage = document.querySelector("#overlayDebugImage");
 
 let currentInputPreviewUrl = null;
 let currentDownloadUrl = "";
+let currentRunId = "";
 
 fileInput?.addEventListener("change", () => {
   const file = fileInput.files?.[0];
@@ -46,9 +47,15 @@ form?.addEventListener("submit", async (event) => {
       throw new Error("生成レスポンスにrun_idが含まれていません。");
     }
 
-    const runPayload = await fetchRunInspection(runId);
-    renderRunResult(runPayload, generatePayload);
+    renderGeneratedOutput(generatePayload);
     setStatus(`生成結果を表示しました。Run ID: ${runId}`, false);
+
+    try {
+      const runPayload = await fetchRunInspection(runId);
+      renderRunResult(runPayload, generatePayload);
+    } catch (inspectionError) {
+      console.warn("Run inspection failed; keeping generated output_url preview.", inspectionError);
+    }
   } catch (error) {
     setStatus(error instanceof Error ? error.message : "生成に失敗しました。", true);
   }
@@ -101,12 +108,13 @@ function clearInputPreview() {
 
 function renderRunResult(runPayload, generatePayload) {
   const files = runPayload.files || {};
-  const outputUrl = toRunUrl(files.output) || generatePayload.output_url || "";
-  currentDownloadUrl = runPayload.download_url || "";
+  const outputUrl = runPayload.output_url || generatePayload.output_url || toRunUrl(files.output) || "";
+  currentRunId = runPayload.run_id || generatePayload.run_id || "";
+  currentDownloadUrl = outputUrl;
 
   outputImage.src = outputUrl;
   outputImage.hidden = !outputUrl;
-  downloadOutputBtn.hidden = !outputUrl || !currentDownloadUrl;
+  downloadOutputBtn.hidden = !outputUrl;
 
   if (overlayImage) {
     const overlayUrl = toRunUrl(files.overlay);
@@ -123,10 +131,22 @@ function renderRunResult(runPayload, generatePayload) {
   resultPanel.hidden = false;
 }
 
+function renderGeneratedOutput(generatePayload) {
+  const outputUrl = generatePayload.output_url || "";
+  currentRunId = generatePayload.run_id || "";
+  currentDownloadUrl = outputUrl;
+
+  outputImage.src = outputUrl;
+  outputImage.hidden = !outputUrl;
+  downloadOutputBtn.hidden = !outputUrl;
+  resultPanel.hidden = false;
+}
+
 function clearOutputPreview() {
   outputImage.removeAttribute("src");
   outputImage.hidden = true;
   currentDownloadUrl = "";
+  currentRunId = "";
   downloadOutputBtn.hidden = true;
 
   if (overlayImage) {
@@ -151,8 +171,33 @@ function setStatus(message, isError) {
   statusEl.classList.toggle("is-error", Boolean(isError));
 }
 
-downloadOutputBtn?.addEventListener("click", () => {
-  if (currentDownloadUrl) {
-    window.location.href = currentDownloadUrl;
+downloadOutputBtn?.addEventListener("click", async () => {
+  if (!currentDownloadUrl) return;
+
+  try {
+    const response = await fetch(currentDownloadUrl);
+    if (!response.ok) {
+      throw new Error("download request failed");
+    }
+    const blob = await response.blob();
+    const objectUrl = URL.createObjectURL(blob);
+    const link = document.createElement("a");
+    link.href = objectUrl;
+    link.download = `madori-ai-${currentRunId || "output"}.png`;
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+    URL.revokeObjectURL(objectUrl);
+  } catch (error) {
+    console.warn("Blob download failed; falling back to direct navigation.", error);
+    window.location.href = toAttachmentUrl(currentDownloadUrl, currentRunId);
   }
 });
+
+function toAttachmentUrl(url, runId) {
+  if (!url || !url.includes("res.cloudinary.com") || !url.includes("/upload/")) {
+    return url;
+  }
+  const filename = `madori-ai-${runId || "output"}`;
+  return url.replace("/upload/", `/upload/fl_attachment:${encodeURIComponent(filename)}/`);
+}

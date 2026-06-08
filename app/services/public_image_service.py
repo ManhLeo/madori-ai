@@ -89,3 +89,42 @@ def upload_floorplan_to_cloudinary(
         raise HTTPException(status_code=502, detail="Cloudinary upload did not return secure_url")
 
     return secure_url
+
+
+def upload_output_to_cloudinary(image_path: Path, run_id: str) -> str:
+    settings = get_settings()
+    if not settings.cloudinary_cloud_name or not settings.cloudinary_api_key or not settings.cloudinary_api_secret:
+        raise HTTPException(
+            status_code=500,
+            detail=(
+                "Cloudinary is not configured. Set CLOUDINARY_CLOUD_NAME, "
+                "CLOUDINARY_API_KEY, and CLOUDINARY_API_SECRET."
+            ),
+        )
+
+    if not image_path.exists():
+        raise HTTPException(status_code=404, detail="generated output image not found")
+
+    cloudinary_config(
+        cloud_name=settings.cloudinary_cloud_name,
+        api_key=settings.cloudinary_api_key,
+        api_secret=settings.cloudinary_api_secret,
+        secure=True,
+    )
+
+    try:
+        response = uploader.upload(
+            str(image_path),
+            folder="madori/outputs",
+            public_id=f"{run_id}_output",
+            resource_type="image",
+            overwrite=True,
+        )
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=f"failed to upload output to Cloudinary: {exc}") from exc
+
+    secure_url = response.get("secure_url") if isinstance(response, dict) else None
+    if not secure_url:
+        raise HTTPException(status_code=502, detail="Cloudinary output upload did not return secure_url")
+
+    return secure_url

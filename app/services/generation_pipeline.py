@@ -2,16 +2,16 @@ import logging
 import shutil
 from pathlib import Path
 
-from fastapi import UploadFile
+from fastapi import HTTPException, UploadFile
 from PIL import Image
 
-from app.config import get_settings
+from app.config import get_settings, is_vercel_runtime
 from app.schemas import GenerationResponse, UserPreferences
 from app.services.file_service import FileService
 from app.services.furniture_overlay_renderer import FurnitureOverlayRenderer
 from app.services.furniture_planner import plan_furniture
 from app.services.image_provider import get_image_provider
-from app.services.public_image_service import upload_floorplan_to_cloudinary
+from app.services.public_image_service import upload_floorplan_to_cloudinary, upload_output_to_cloudinary
 from app.services.prompt_builder import PromptBuilder
 from app.services.vision_analyzer import VisionAnalyzer
 
@@ -115,13 +115,24 @@ def run_generation_pipeline(
         input_image_url=public_floorplan_url,
     )
     file_service.copy_output_to_public(run_id, output_path)
+    output_url = f"/static/outputs/{run_id}_output.png"
+
+    if _should_persist_output_to_cloudinary(provider_name):
+        try:
+            output_url = upload_output_to_cloudinary(output_path, run_id)
+            file_service.save_text_file(run_id, "output_url.txt", output_url)
+            logger.info("generate cloudinary_output_url=%s", output_url)
+        except HTTPException:
+            if is_vercel_runtime():
+                raise
+            logger.exception("failed to persist output to Cloudinary; falling back to local output URL")
 
     return GenerationResponse(
         status="completed",
         run_id=run_id,
         analysis=analysis,
         prompt=prompt,
-        output_url=f"/static/outputs/{run_id}_output.png",
+        output_url=output_url,
     )
 
 
@@ -193,6 +204,14 @@ def _build_provider_status(provider_name: str) -> dict:
         "input_image_mode": "original_floorplan",
         "overlay_used_for_provider": False,
     }
+
+
+def _should_persist_output_to_cloudinary(provider_name: str) -> bool:
+    settings = get_settings()
+    has_cloudinary_config = bool(
+        settings.cloudinary_cloud_name and settings.cloudinary_api_key and settings.cloudinary_api_secret
+    )
+    return has_cloudinary_config and (is_vercel_runtime() or provider_name != "stub")
 
 
 def _create_overlay_fallback(floorplan_path: Path, overlay_floorplan_path: Path) -> None:
