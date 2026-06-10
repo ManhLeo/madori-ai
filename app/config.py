@@ -34,6 +34,8 @@ class Settings(BaseSettings):
     runs_dir: Path = RUNS_DIR
     static_dir: Path = STATIC_DIR
     image_provider: str = Field(default="stub", validation_alias="IMAGE_PROVIDER")
+    output_match_input_size: bool = Field(default=True, validation_alias="OUTPUT_MATCH_INPUT_SIZE")
+    output_resize_mode: str = Field(default="contain", validation_alias="OUTPUT_RESIZE_MODE")
     openai_api_key: str | None = Field(default=None, validation_alias="OPENAI_API_KEY")
     openai_vision_model: str = Field(default="gpt-4o-mini", validation_alias="OPENAI_VISION_MODEL")
     openai_image_model: str = Field(default="gpt-image-1", validation_alias="OPENAI_IMAGE_MODEL")

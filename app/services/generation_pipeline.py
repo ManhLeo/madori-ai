@@ -10,6 +10,7 @@ from app.schemas import GenerationResponse, UserPreferences
 from app.services.file_service import FileService
 from app.services.furniture_overlay_renderer import FurnitureOverlayRenderer
 from app.services.furniture_planner import plan_furniture
+from app.services.image_postprocessor import match_image_size
 from app.services.image_provider import get_image_provider
 from app.services.public_image_service import upload_floorplan_to_cloudinary, upload_output_to_cloudinary
 from app.services.prompt_builder import PromptBuilder
@@ -51,11 +52,6 @@ def run_generation_pipeline(
     prompt_style = preferences.interior_style or style
     prompt = prompt_builder.build_generation_prompt(analysis, prompt_style, furniture_plan)
     file_service.save_text_file(run_id, "prompt.txt", prompt)
-    file_service.save_json_file(
-        run_id,
-        "generation_debug.json",
-        _build_generation_debug(run_id, provider_name, prompt, furniture_plan),
-    )
     file_service.save_json_file(run_id, "provider_status.json", _build_provider_status(provider_name))
 
     # Debug-only artifact: never pass this overlay image to real image providers.
@@ -114,6 +110,18 @@ def run_generation_pipeline(
         run_dir / "output.png",
         input_image_url=public_floorplan_url,
     )
+    image_postprocess_metadata = _postprocess_output_image(file_service, run_id, Path(output_path), Path(floorplan_path))
+    file_service.save_json_file(
+        run_id,
+        "generation_debug.json",
+        _build_generation_debug(
+            run_id,
+            provider_name,
+            prompt,
+            furniture_plan,
+            image_postprocess_metadata,
+        ),
+    )
     file_service.copy_output_to_public(run_id, output_path)
     output_url = f"/static/outputs/{run_id}_output.png"
 
@@ -160,9 +168,15 @@ def _count_furniture_items(furniture_plan) -> int:
     return sum(len(room_plan.items) for room_plan in furniture_plan.room_plans)
 
 
-def _build_generation_debug(run_id: str, provider_name: str, prompt: str, furniture_plan) -> dict:
+def _build_generation_debug(
+    run_id: str,
+    provider_name: str,
+    prompt: str,
+    furniture_plan,
+    image_postprocess_metadata: dict | None = None,
+) -> dict:
     normalized_prompt = prompt.lower()
-    return {
+    debug_payload = {
         "run_id": run_id,
         "image_provider": provider_name,
         "input_image_mode": "original_floorplan",
@@ -182,6 +196,21 @@ def _build_generation_debug(run_id: str, provider_name: str, prompt: str, furnit
         "furniture_plan_room_count": len(furniture_plan.room_plans),
         "furniture_plan_item_count": _count_furniture_items(furniture_plan),
     }
+    debug_payload.update(
+        {
+            "output_match_input_size": bool(image_postprocess_metadata and image_postprocess_metadata.get("output_match_input_size")),
+            "output_resize_mode": (image_postprocess_metadata or {}).get("resize_mode"),
+            "input_width": (image_postprocess_metadata or {}).get("reference_width"),
+            "input_height": (image_postprocess_metadata or {}).get("reference_height"),
+            "provider_output_width_before_resize": (image_postprocess_metadata or {}).get("original_output_width"),
+            "provider_output_height_before_resize": (image_postprocess_metadata or {}).get("original_output_height"),
+            "output_width": (image_postprocess_metadata or {}).get("final_output_width"),
+            "output_height": (image_postprocess_metadata or {}).get("final_output_height"),
+        }
+    )
+    if image_postprocess_metadata and image_postprocess_metadata.get("postprocess_error"):
+        debug_payload["image_postprocess_error"] = image_postprocess_metadata["postprocess_error"]
+    return debug_payload
 
 
 def _contains_all(text: str, terms: tuple[str, ...]) -> bool:
@@ -212,6 +241,79 @@ def _should_persist_output_to_cloudinary(provider_name: str) -> bool:
         settings.cloudinary_cloud_name and settings.cloudinary_api_key and settings.cloudinary_api_secret
     )
     return has_cloudinary_config and (is_vercel_runtime() or provider_name != "stub")
+
+
+def _postprocess_output_image(
+    file_service: FileService,
+    run_id: str,
+    output_path: Path,
+    floorplan_path: Path,
+) -> dict:
+    settings = get_settings()
+    metadata = {
+        "output_match_input_size": bool(settings.output_match_input_size),
+        "resize_mode": settings.output_resize_mode,
+    }
+    if not settings.output_match_input_size:
+        input_width, input_height = _read_image_size(floorplan_path)
+        output_width, output_height = _read_image_size(output_path)
+        metadata.update(
+            {
+                "reference_width": input_width,
+                "reference_height": input_height,
+                "original_output_width": output_width,
+                "original_output_height": output_height,
+                "final_output_width": output_width,
+                "final_output_height": output_height,
+            }
+        )
+        file_service.save_json_file(run_id, "image_postprocess.json", metadata)
+        return metadata
+
+    try:
+        match_metadata = match_image_size(
+            output_image_path=output_path,
+            reference_image_path=floorplan_path,
+            mode=settings.output_resize_mode,
+        )
+        metadata.update(match_metadata)
+        file_service.save_json_file(run_id, "image_postprocess.json", metadata)
+        return metadata
+    except HTTPException as exc:
+        logger.exception("image post-processing failed run_id=%s", run_id)
+        metadata["postprocess_error"] = str(exc.detail)
+        if output_path.exists():
+            input_width, input_height = _read_image_size(floorplan_path)
+            output_width, output_height = _safe_read_image_size(output_path)
+            metadata.update(
+                {
+                    "reference_width": input_width,
+                    "reference_height": input_height,
+                    "original_output_width": output_width,
+                    "original_output_height": output_height,
+                    "final_output_width": output_width,
+                    "final_output_height": output_height,
+                }
+            )
+            file_service.save_text_file(run_id, "image_postprocess_error.txt", str(exc.detail))
+            file_service.save_json_file(run_id, "image_postprocess.json", metadata)
+            return metadata
+        raise
+
+
+def _read_image_size(image_path: Path) -> tuple[int, int]:
+    try:
+        with Image.open(image_path) as image:
+            return image.size
+    except OSError as exc:
+        raise HTTPException(status_code=500, detail=f"failed to read image size from {image_path.name}: {exc}") from exc
+
+
+def _safe_read_image_size(image_path: Path) -> tuple[int | None, int | None]:
+    try:
+        return _read_image_size(image_path)
+    except HTTPException:
+        return None, None
 
 
 def _create_overlay_fallback(floorplan_path: Path, overlay_floorplan_path: Path) -> None:
