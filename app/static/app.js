@@ -8,6 +8,16 @@ const outputImage = document.querySelector("#outputImage");
 const downloadOutputBtn = document.querySelector("#downloadOutputBtn");
 const overlayImage = document.querySelector("#overlayImage");
 const overlayDebugImage = document.querySelector("#overlayDebugImage");
+const qualitySummaryPanel = document.querySelector("#qualitySummaryPanel");
+const manualReviewBadge = document.querySelector("#manualReviewBadge");
+const qualityOutputSize = document.querySelector("#qualityOutputSize");
+const qualityEnglishLabels = document.querySelector("#qualityEnglishLabels");
+const qualityLayoutAccuracy = document.querySelector("#qualityLayoutAccuracy");
+const qualityWatercolor = document.querySelector("#qualityWatercolor");
+const manualLabelsJson = document.querySelector("#manualLabelsJson");
+const saveManualLabelsBtn = document.querySelector("#saveManualLabelsBtn");
+const applyManualLabelsBtn = document.querySelector("#applyManualLabelsBtn");
+const manualLabelsStatus = document.querySelector("#manualLabelsStatus");
 
 let currentInputPreviewUrl = null;
 let currentDownloadUrl = "";
@@ -128,6 +138,9 @@ function renderRunResult(runPayload, generatePayload) {
     overlayDebugImage.hidden = !overlayDebugUrl;
   }
 
+  renderQualitySummary(runPayload.quality_check, runPayload.output_label_edit, runPayload.generation_debug);
+  renderManualLabels(runPayload.manual_labels);
+
   resultPanel.hidden = false;
 }
 
@@ -158,6 +171,9 @@ function clearOutputPreview() {
     overlayDebugImage.removeAttribute("src");
     overlayDebugImage.hidden = true;
   }
+
+  clearQualitySummary();
+  clearManualLabelsEditor();
 }
 
 function toRunUrl(path) {
@@ -169,6 +185,49 @@ function toRunUrl(path) {
 function setStatus(message, isError) {
   statusEl.textContent = message;
   statusEl.classList.toggle("is-error", Boolean(isError));
+}
+
+function renderQualitySummary(qualityCheck, outputLabelEdit, generationDebug) {
+  if (!qualitySummaryPanel || !qualityCheck) return;
+
+  const actualSize = qualityCheck.output_size_actual || formatOutputSize(generationDebug);
+  const requiredSize = qualityCheck.output_size_required || "";
+  qualityOutputSize.textContent = requiredSize && actualSize ? `${actualSize} / required ${requiredSize}` : actualSize || "-";
+  qualityEnglishLabels.textContent = outputLabelEdit?.status || qualityCheck.english_labels_status || "-";
+  qualityLayoutAccuracy.textContent = qualityCheck.layout_accuracy_status || "manual_review_required";
+  qualityWatercolor.textContent = qualityCheck.watercolor_quality_status || "manual_review_required";
+
+  if (manualReviewBadge) {
+    manualReviewBadge.hidden = !qualityCheck.needs_manual_review;
+  }
+  qualitySummaryPanel.hidden = false;
+}
+
+function renderManualLabels(manualLabels) {
+  if (!manualLabelsJson) return;
+  manualLabelsJson.value = JSON.stringify(manualLabels || emptyManualLabels(), null, 2);
+  setManualLabelsStatus("", false);
+}
+
+function clearQualitySummary() {
+  if (!qualitySummaryPanel) return;
+  qualitySummaryPanel.hidden = true;
+  if (qualityOutputSize) qualityOutputSize.textContent = "-";
+  if (qualityEnglishLabels) qualityEnglishLabels.textContent = "-";
+  if (qualityLayoutAccuracy) qualityLayoutAccuracy.textContent = "Manual review required";
+  if (qualityWatercolor) qualityWatercolor.textContent = "Manual review required";
+}
+
+function clearManualLabelsEditor() {
+  if (manualLabelsJson) {
+    manualLabelsJson.value = "";
+  }
+  setManualLabelsStatus("", false);
+}
+
+function formatOutputSize(generationDebug) {
+  if (!generationDebug?.output_width || !generationDebug?.output_height) return "";
+  return `${generationDebug.output_width}x${generationDebug.output_height}`;
 }
 
 downloadOutputBtn?.addEventListener("click", async () => {
@@ -200,4 +259,79 @@ function toAttachmentUrl(url, runId) {
   }
   const filename = `madori-ai-${runId || "output"}`;
   return url.replace("/upload/", `/upload/fl_attachment:${encodeURIComponent(filename)}/`);
+}
+
+saveManualLabelsBtn?.addEventListener("click", async () => {
+  if (!currentRunId) return;
+  try {
+    const payload = parseManualLabels();
+    const saved = await putManualLabels(currentRunId, payload);
+    renderManualLabels(saved);
+    setManualLabelsStatus("Manual labels saved.", false);
+  } catch (error) {
+    setManualLabelsStatus(error instanceof Error ? error.message : "Failed to save manual labels.", true);
+  }
+});
+
+applyManualLabelsBtn?.addEventListener("click", async () => {
+  if (!currentRunId) return;
+  try {
+    const payload = parseManualLabels();
+    await putManualLabels(currentRunId, payload);
+    const applied = await applyManualLabels(currentRunId);
+    setManualLabelsStatus("Manual labels applied to output image.", false);
+    const runPayload = await fetchRunInspection(currentRunId);
+    renderRunResult(runPayload, { run_id: currentRunId, output_url: applied.output_url || currentDownloadUrl });
+    reloadOutputImage();
+  } catch (error) {
+    setManualLabelsStatus(error instanceof Error ? error.message : "Failed to apply manual labels.", true);
+  }
+});
+
+function parseManualLabels() {
+  try {
+    return JSON.parse(manualLabelsJson?.value || "{}");
+  } catch {
+    throw new Error("Manual labels JSON is invalid.");
+  }
+}
+
+async function putManualLabels(runId, payload) {
+  const response = await fetch(`/api/runs/${encodeURIComponent(runId)}/labels`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+  const responsePayload = await readJsonResponse(response, `PUT /api/runs/${runId}/labels`);
+  if (!response.ok) {
+    throw new Error(responsePayload.detail || "Failed to save manual labels.");
+  }
+  return responsePayload;
+}
+
+async function applyManualLabels(runId) {
+  const response = await fetch(`/api/runs/${encodeURIComponent(runId)}/apply-labels`, {
+    method: "POST",
+  });
+  const responsePayload = await readJsonResponse(response, `POST /api/runs/${runId}/apply-labels`);
+  if (!response.ok) {
+    throw new Error(responsePayload.detail || "Failed to apply manual labels.");
+  }
+  return responsePayload;
+}
+
+function reloadOutputImage() {
+  if (!outputImage?.src) return;
+  const separator = outputImage.src.includes("?") ? "&" : "?";
+  outputImage.src = `${outputImage.src}${separator}labels=${Date.now()}`;
+}
+
+function emptyManualLabels() {
+  return { version: "1.0", labels: [] };
+}
+
+function setManualLabelsStatus(message, isError) {
+  if (!manualLabelsStatus) return;
+  manualLabelsStatus.textContent = message;
+  manualLabelsStatus.classList.toggle("is-error", Boolean(isError));
 }

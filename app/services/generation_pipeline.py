@@ -12,6 +12,8 @@ from app.services.furniture_overlay_renderer import FurnitureOverlayRenderer
 from app.services.furniture_planner import plan_furniture
 from app.services.image_postprocessor import match_image_size
 from app.services.image_provider import get_image_provider
+from app.services.manual_label_builder import build_manual_labels_from_analysis
+from app.services.output_text_editor import disabled_label_edit_metadata, edit_output_labels
 from app.services.public_image_service import upload_floorplan_to_cloudinary, upload_output_to_cloudinary
 from app.services.prompt_builder import PromptBuilder
 from app.services.vision_analyzer import VisionAnalyzer
@@ -111,6 +113,10 @@ def run_generation_pipeline(
         input_image_url=public_floorplan_url,
     )
     image_postprocess_metadata = _postprocess_output_image(file_service, run_id, Path(output_path), Path(floorplan_path))
+    file_service.save_json_file(run_id, "manual_labels.json", _build_initial_manual_labels(analysis, image_postprocess_metadata))
+    output_label_edit_metadata = _edit_output_labels(file_service, run_id, Path(output_path), analysis)
+    quality_check = _build_quality_check(settings, image_postprocess_metadata, output_label_edit_metadata)
+    file_service.save_json_file(run_id, "quality_check.json", quality_check)
     file_service.save_json_file(
         run_id,
         "generation_debug.json",
@@ -120,6 +126,7 @@ def run_generation_pipeline(
             prompt,
             furniture_plan,
             image_postprocess_metadata,
+            output_label_edit_metadata,
         ),
     )
     file_service.copy_output_to_public(run_id, output_path)
@@ -174,6 +181,7 @@ def _build_generation_debug(
     prompt: str,
     furniture_plan,
     image_postprocess_metadata: dict | None = None,
+    output_label_edit_metadata: dict | None = None,
 ) -> dict:
     normalized_prompt = prompt.lower()
     debug_payload = {
@@ -199,6 +207,7 @@ def _build_generation_debug(
     debug_payload.update(
         {
             "output_match_input_size": bool(image_postprocess_metadata and image_postprocess_metadata.get("output_match_input_size")),
+            "output_size_mode": (image_postprocess_metadata or {}).get("output_size_mode"),
             "output_resize_mode": (image_postprocess_metadata or {}).get("resize_mode"),
             "input_width": (image_postprocess_metadata or {}).get("reference_width"),
             "input_height": (image_postprocess_metadata or {}).get("reference_height"),
@@ -206,6 +215,10 @@ def _build_generation_debug(
             "provider_output_height_before_resize": (image_postprocess_metadata or {}).get("original_output_height"),
             "output_width": (image_postprocess_metadata or {}).get("final_output_width"),
             "output_height": (image_postprocess_metadata or {}).get("final_output_height"),
+            "output_label_edit_enabled": bool(output_label_edit_metadata and output_label_edit_metadata.get("enabled")),
+            "output_label_mode": (output_label_edit_metadata or {}).get("mode"),
+            "quality_check_path": "quality_check.json",
+            "manual_review_required": True,
         }
     )
     if image_postprocess_metadata and image_postprocess_metadata.get("postprocess_error"):
@@ -250,15 +263,28 @@ def _postprocess_output_image(
     floorplan_path: Path,
 ) -> dict:
     settings = get_settings()
+    output_size_mode = settings.output_size_mode.strip().lower()
+    resize_mode = settings.output_resize_mode.strip().lower()
     metadata = {
-        "output_match_input_size": bool(settings.output_match_input_size),
-        "resize_mode": settings.output_resize_mode,
+        "output_match_input_size": output_size_mode == "match_input" and bool(settings.output_match_input_size),
+        "output_size_mode": output_size_mode,
+        "resize_mode": resize_mode,
+        "required_width": settings.output_width if output_size_mode == "fixed" else None,
+        "required_height": settings.output_height if output_size_mode == "fixed" else None,
     }
-    if not settings.output_match_input_size:
+    if output_size_mode not in {"match_input", "fixed"}:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Unsupported OUTPUT_SIZE_MODE: {settings.output_size_mode}. Expected match_input or fixed.",
+        )
+
+    if output_size_mode == "match_input" and not settings.output_match_input_size:
         input_width, input_height = _read_image_size(floorplan_path)
         output_width, output_height = _read_image_size(output_path)
         metadata.update(
             {
+                "required_width": input_width,
+                "required_height": input_height,
                 "reference_width": input_width,
                 "reference_height": input_height,
                 "original_output_width": output_width,
@@ -274,7 +300,10 @@ def _postprocess_output_image(
         match_metadata = match_image_size(
             output_image_path=output_path,
             reference_image_path=floorplan_path,
-            mode=settings.output_resize_mode,
+            mode=resize_mode,
+            output_size_mode=output_size_mode,
+            required_width=settings.output_width,
+            required_height=settings.output_height,
         )
         metadata.update(match_metadata)
         file_service.save_json_file(run_id, "image_postprocess.json", metadata)
@@ -299,6 +328,71 @@ def _postprocess_output_image(
             file_service.save_json_file(run_id, "image_postprocess.json", metadata)
             return metadata
         raise
+
+
+def _edit_output_labels(
+    file_service: FileService,
+    run_id: str,
+    output_path: Path,
+    analysis,
+) -> dict:
+    settings = get_settings()
+    if not settings.output_label_edit_enabled:
+        metadata = disabled_label_edit_metadata()
+        file_service.save_json_file(run_id, "output_label_edit.json", metadata)
+        return metadata
+
+    try:
+        metadata = edit_output_labels(
+            output_image_path=output_path,
+            analysis=analysis,
+            mode=settings.output_label_mode,
+            language=settings.output_label_language,
+        )
+    except HTTPException as exc:
+        logger.exception("output label editing failed run_id=%s", run_id)
+        metadata = {
+            "enabled": True,
+            "mode": settings.output_label_mode,
+            "language": settings.output_label_language,
+            "status": "needs_review",
+            "edited_labels": [],
+            "warnings": [str(exc.detail)],
+        }
+        file_service.save_text_file(run_id, "output_label_edit_error.txt", str(exc.detail))
+
+    file_service.save_json_file(run_id, "output_label_edit.json", metadata)
+    return metadata
+
+
+def _build_quality_check(settings, image_postprocess_metadata: dict, output_label_edit_metadata: dict) -> dict:
+    required_width = image_postprocess_metadata.get("required_width") or settings.output_width
+    required_height = image_postprocess_metadata.get("required_height") or settings.output_height
+    actual_width = image_postprocess_metadata.get("final_output_width")
+    actual_height = image_postprocess_metadata.get("final_output_height")
+    label_status = output_label_edit_metadata.get("status") or "needs_review"
+    if settings.output_label_edit_enabled and label_status == "skipped":
+        label_status = "needs_review"
+    return {
+        "output_size_required": f"{required_width}x{required_height}",
+        "output_size_actual": f"{actual_width}x{actual_height}" if actual_width and actual_height else "unknown",
+        "english_labels_required": bool(settings.output_label_edit_enabled),
+        "english_labels_status": label_status,
+        "layout_accuracy_required": "100%",
+        "layout_accuracy_status": "manual_review_required",
+        "watercolor_quality_status": "manual_review_required",
+        "needs_manual_review": True,
+    }
+
+
+def _build_initial_manual_labels(analysis, image_postprocess_metadata: dict) -> dict:
+    return build_manual_labels_from_analysis(
+        analysis,
+        output_width=int(image_postprocess_metadata.get("final_output_width") or 1200),
+        output_height=int(image_postprocess_metadata.get("final_output_height") or 1200),
+        reference_width=image_postprocess_metadata.get("reference_width"),
+        reference_height=image_postprocess_metadata.get("reference_height"),
+    )
 
 
 def _read_image_size(image_path: Path) -> tuple[int, int]:

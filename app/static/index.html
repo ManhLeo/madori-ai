@@ -192,8 +192,45 @@
                   <img id="outputImage" class="result-image" alt="生成されたイラスト間取り図" hidden />
                 </div>
               </div>
+              <div class="quality-summary" id="qualitySummaryPanel" hidden>
+                <div class="quality-summary-header">
+                  <h3>Production compliance</h3>
+                  <span id="manualReviewBadge" class="review-badge">Manual review required</span>
+                </div>
+                <dl class="quality-summary-list">
+                  <div>
+                    <dt>Output size</dt>
+                    <dd id="qualityOutputSize">-</dd>
+                  </div>
+                  <div>
+                    <dt>English labels</dt>
+                    <dd id="qualityEnglishLabels">-</dd>
+                  </div>
+                  <div>
+                    <dt>Layout accuracy</dt>
+                    <dd id="qualityLayoutAccuracy">Manual review required</dd>
+                  </div>
+                  <div>
+                    <dt>Watercolor quality</dt>
+                    <dd id="qualityWatercolor">Manual review required</dd>
+                  </div>
+                </dl>
+                <div class="manual-label-editor">
+                  <label for="manualLabelsJson">Manual English labels JSON</label>
+                  <textarea id="manualLabelsJson" spellcheck="false"></textarea>
+                  <div class="manual-label-actions">
+                    <button id="saveManualLabelsBtn" class="secondary-button compact" type="button">
+                      Save labels
+                    </button>
+                    <button id="applyManualLabelsBtn" class="download-button compact" type="button">
+                      Apply labels
+                    </button>
+                  </div>
+                  <p id="manualLabelsStatus" class="manual-label-status"></p>
+                </div>
+              </div>
 
-              <details class="debug-details">
+              <!-- <details class="debug-details">
                 <summary>Debug</summary>
                 <p class="debug-note">以下は内部確認用です。最終生成画像ではありません。</p>
 
@@ -228,7 +265,7 @@
                   <h4>Prompt preview</h4>
                   <pre id="promptPreview" class="prompt-preview"></pre>
                 </section>
-              </details>
+              </details> -->
             </div>
           </form>
         </div>
