@@ -34,6 +34,9 @@ benchmark_runs/*
 uvicorn-*.out.log
 uvicorn-*.err.log
 payload.json
+google-vision-sa.json
+*service-account*.json
+*credentials*.json
 
 # OS/editor files
 .DS_Store

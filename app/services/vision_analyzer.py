@@ -1,12 +1,10 @@
 from __future__ import annotations
 
-import base64
 import json
 from pathlib import Path
 from typing import Iterable
 
 from fastapi import HTTPException
-from openai import OpenAI
 
 from app.config import get_settings
 from app.schemas import (
@@ -53,13 +51,6 @@ def _coerce_bbox(value) -> list[float] | None:
 
 
 class VisionAnalyzer:
-    DEFAULT_OPENROUTER_MODELS = [
-        "moonshotai/kimi-k2.6:free",
-        "google/gemma-4-26b-a4b-it:free",
-        "google/gemma-4-31b-it:free",
-        "nvidia/nemotron-nano-12b-v2-vl:free",
-    ]
-
     NORMALIZED_ROOM_TYPES = {
         "living_room",
         "bedroom",
@@ -157,12 +148,6 @@ class VisionAnalyzer:
         settings = get_settings()
         if settings.use_gemini_analysis:
             return self.analyze_floorplan_gemini(image_path)
-        if settings.use_openrouter_analysis:
-            analysis, raw_payload = self._analyze_floorplan_openrouter_with_raw(image_path)
-            return analysis, None, raw_payload
-        if settings.use_openai_analysis:
-            analysis, raw_payload = self._analyze_floorplan_openai_with_raw(image_path)
-            return analysis, None, raw_payload
 
         analysis = self.analyze_floorplan_stub(image_path)
         return analysis, None, {
@@ -293,197 +278,6 @@ class VisionAnalyzer:
             "furniture_plan": furniture_plan.model_dump(mode="json") if furniture_plan else None,
         }
         return analysis, furniture_plan, raw_payload
-
-    def analyze_floorplan_openai(self, image_path: Path) -> FloorplanAnalysis:
-        analysis, _ = self._analyze_floorplan_openai_with_raw(image_path)
-        return analysis
-
-    def analyze_floorplan_openrouter(self, image_path: Path) -> FloorplanAnalysis:
-        analysis, _ = self._analyze_floorplan_openrouter_with_raw(image_path)
-        return analysis
-
-    def _analyze_floorplan_openai_with_raw(self, image_path: Path) -> tuple[FloorplanAnalysis, dict]:
-        settings = get_settings()
-        if not settings.openai_api_key:
-            raise HTTPException(
-                status_code=500,
-                detail="OpenAI floorplan analysis is enabled but OPENAI_API_KEY is missing.",
-            )
-
-        if not image_path.exists():
-            raise HTTPException(status_code=404, detail="floorplan image not found")
-
-        client = OpenAI(api_key=settings.openai_api_key)
-        image_url = self._build_data_url(image_path)
-        instructions = self._floorplan_prompt()
-
-        try:
-            response = client.responses.parse(
-                model=settings.openai_vision_model,
-                instructions=instructions,
-                input=[
-                    {
-                        "role": "user",
-                        "content": [
-                            {
-                                "type": "input_text",
-                                "text": (
-                                    "Inspect the floorplan image and return a structured floorplan analysis matching the schema. "
-                                    "Keep the descriptions grounded in visible evidence only."
-                                ),
-                            },
-                            {
-                                "type": "input_image",
-                                "image_url": image_url,
-                                "detail": "high",
-                            },
-                        ],
-                    }
-                ],
-                text_format=FloorplanAnalysis,
-                temperature=0,
-            )
-        except Exception as exc:
-            raise HTTPException(status_code=502, detail=f"OpenAI floorplan analysis failed: {exc}") from exc
-
-        parsed = response.output_parsed
-        if parsed is None:
-            raise HTTPException(
-                status_code=502,
-                detail="OpenAI returned no structured floorplan analysis.",
-            )
-
-        if isinstance(parsed, FloorplanAnalysis):
-            analysis = parsed
-        else:
-            try:
-                analysis = FloorplanAnalysis.model_validate(parsed)
-            except Exception as exc:
-                raise HTTPException(
-                    status_code=502,
-                    detail=f"OpenAI returned an invalid floorplan analysis payload: {exc}",
-                ) from exc
-
-        raw_payload = {
-            "provider": "openai",
-            "model": settings.openai_vision_model,
-            "response_text": getattr(response, "output_text", None) or self._model_dump_json(analysis),
-            "parse_mode": "structured_json",
-        }
-        return analysis, raw_payload
-
-    def _analyze_floorplan_openrouter_with_raw(self, image_path: Path) -> tuple[FloorplanAnalysis, dict]:
-        settings = get_settings()
-        if not settings.openrouter_api_key:
-            raise HTTPException(
-                status_code=500,
-                detail="OpenRouter floorplan analysis is enabled but OPENROUTER_API_KEY is missing.",
-            )
-
-        if not image_path.exists():
-            raise HTTPException(status_code=404, detail="floorplan image not found")
-
-        errors: list[str] = []
-        for model_name in self._openrouter_model_candidates(settings):
-            try:
-                return self._analyze_floorplan_openrouter_with_model(image_path, model_name, settings.openrouter_api_key)
-            except HTTPException as exc:
-                errors.append(f"{model_name}: {exc.detail}")
-            except Exception as exc:
-                errors.append(f"{model_name}: {exc}")
-
-        raise HTTPException(
-            status_code=502,
-            detail="OpenRouter floorplan analysis failed across all fallback models: " + " | ".join(errors),
-        )
-
-    def _analyze_floorplan_openrouter_with_model(
-        self,
-        image_path: Path,
-        model_name: str,
-        api_key: str,
-    ) -> tuple[FloorplanAnalysis, dict]:
-        client = OpenAI(
-            api_key=api_key,
-            base_url="https://openrouter.ai/api/v1",
-            default_headers={
-                "HTTP-Referer": "http://localhost",
-                "X-OpenRouter-Title": get_settings().app_name,
-            },
-        )
-        image_url = self._build_data_url(image_path)
-        instructions = self._floorplan_prompt()
-
-        try:
-            completion = client.chat.completions.parse(
-                model=model_name,
-                messages=[
-                    {"role": "system", "content": instructions},
-                    {
-                        "role": "user",
-                        "content": [
-                            {
-                                "type": "text",
-                                "text": (
-                                    "Inspect the floorplan image and return a structured floorplan analysis matching the schema. "
-                                    "Keep the descriptions grounded in visible evidence only."
-                                ),
-                            },
-                            {
-                                "type": "image_url",
-                                "image_url": {
-                                    "url": image_url,
-                                    "detail": "high",
-                                },
-                            },
-                        ],
-                    },
-                ],
-                response_format=FloorplanAnalysis,
-                temperature=0,
-            )
-        except Exception as exc:
-            raise HTTPException(status_code=502, detail=f"OpenRouter floorplan analysis failed: {exc}") from exc
-
-        try:
-            message = completion.choices[0].message
-            if message.parsed is not None:
-                if isinstance(message.parsed, FloorplanAnalysis):
-                    analysis = message.parsed
-                else:
-                    analysis = FloorplanAnalysis.model_validate(message.parsed)
-            else:
-                content = message.content
-                if not content:
-                    raise ValueError("empty response content")
-                if not isinstance(content, str):
-                    content = json.dumps(content, ensure_ascii=False)
-                analysis = FloorplanAnalysis.model_validate_json(content)
-        except Exception as exc:
-            raise HTTPException(
-                status_code=502,
-                detail=f"OpenRouter returned an invalid floorplan analysis payload: {exc}",
-            ) from exc
-
-        raw_payload = {
-            "provider": "openrouter",
-            "model": model_name,
-            "response_text": self._extract_openrouter_text(completion),
-            "parse_mode": "structured_json",
-        }
-        return analysis, raw_payload
-
-    def _openrouter_model_candidates(self, settings) -> list[str]:
-        if settings.openrouter_vision_models:
-            candidates = self._split_model_list(settings.openrouter_vision_models)
-        else:
-            candidates = [settings.openrouter_vision_model, *self.DEFAULT_OPENROUTER_MODELS]
-
-        return self._dedupe_preserve_order(candidates)
-
-    @staticmethod
-    def _split_model_list(models: str) -> list[str]:
-        return [model.strip() for model in models.split(",") if model.strip()]
 
     @staticmethod
     def _dedupe_preserve_order(values: list[str]) -> list[str]:
@@ -1064,29 +858,6 @@ class VisionAnalyzer:
         if mime_type is None:
             raise HTTPException(status_code=415, detail="unsupported floorplan image type")
         return mime_type
-
-    @staticmethod
-    def _build_data_url(image_path: Path) -> str:
-        mime_type = VisionAnalyzer._mime_type_for_path(image_path)
-        encoded = base64.b64encode(image_path.read_bytes()).decode("ascii")
-        return f"data:{mime_type};base64,{encoded}"
-
-    @staticmethod
-    def _extract_openrouter_text(completion) -> str:
-        try:
-            message = completion.choices[0].message
-            content = message.content
-            if isinstance(content, str):
-                return content
-            if content is None:
-                return ""
-            return json.dumps(content, ensure_ascii=False)
-        except Exception:
-            return ""
-
-    @staticmethod
-    def _model_dump_json(analysis: FloorplanAnalysis) -> str:
-        return analysis.model_dump_json(indent=2)
 
     @staticmethod
     def _extract_gemini_text(response) -> str:

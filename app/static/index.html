@@ -207,16 +207,80 @@
                     <dd id="qualityEnglishLabels">-</dd>
                   </div>
                   <div>
+                    <dt>Detected label boxes</dt>
+                    <dd id="detectedLabelBoxCount">-</dd>
+                  </div>
+                  <div>
+                    <dt>OCR text boxes</dt>
+                    <dd id="ocrTextBoxCount">-</dd>
+                  </div>
+                  <div>
+                    <dt>Auto label suggestions</dt>
+                    <dd id="autoLabelSuggestionCount">-</dd>
+                  </div>
+                  <div>
                     <dt>Layout accuracy</dt>
                     <dd id="qualityLayoutAccuracy">Manual review required</dd>
+                  </div>
+                  <div>
+                    <dt>Layout lock</dt>
+                    <dd id="layoutLockStatus">-</dd>
+                  </div>
+                  <div>
+                    <dt>Layout guard score</dt>
+                    <dd id="layoutGuardScore">-</dd>
+                  </div>
+                  <div>
+                    <dt>Guard compare region</dt>
+                    <dd id="layoutGuardCompareRegion">-</dd>
                   </div>
                   <div>
                     <dt>Watercolor quality</dt>
                     <dd id="qualityWatercolor">Manual review required</dd>
                   </div>
                 </dl>
+                <div class="layout-lock-preview" id="layoutLockPreview" hidden>
+                  <h4>Layout Lock Debug</h4>
+                  <div class="layout-lock-preview-grid">
+                    <a id="normalizedFloorplanLink" target="_blank" rel="noreferrer" hidden>normalized_floorplan</a>
+                    <a id="structureMaskLink" target="_blank" rel="noreferrer" hidden>structure_mask</a>
+                    <a id="structureLayerLink" target="_blank" rel="noreferrer" hidden>structure_layer</a>
+                    <a id="layoutDiffLink" target="_blank" rel="noreferrer" hidden>layout_diff</a>
+                    <a id="layoutGuardReferenceCropLink" target="_blank" rel="noreferrer" hidden>guard_reference_crop</a>
+                    <a id="layoutGuardOutputCropLink" target="_blank" rel="noreferrer" hidden>guard_output_crop</a>
+                    <a id="aiDraftOutputLink" target="_blank" rel="noreferrer" hidden>ai_draft_output</a>
+                  </div>
+                  <div class="layout-lock-preview-images">
+                    <img id="normalizedFloorplanImage" alt="normalized floorplan" hidden />
+                    <img id="layoutDiffImage" alt="layout guard diff" hidden />
+                  </div>
+                </div>
                 <div class="manual-label-editor">
                   <label for="manualLabelsJson">Manual English labels JSON</label>
+                  <div class="label-preset-row" aria-label="Label presets">
+                    <button type="button" data-label-preset="Living Room">Living Room</button>
+                    <button type="button" data-label-preset="Kitchen">Kitchen</button>
+                    <button type="button" data-label-preset="Closet">Closet</button>
+                    <button type="button" data-label-preset="Toilet">Toilet</button>
+                    <button type="button" data-label-preset="Entrance">Entrance</button>
+                    <button type="button" data-label-preset="Bed Room">Bed Room</button>
+                    <button type="button" data-label-preset="Bath Room">Bath Room</button>
+                    <button type="button" data-label-preset="Wash Room">Wash Room</button>
+                    <button type="button" data-label-preset="Balcony">Balcony</button>
+                  </div>
+                  <div class="label-editor-toolbar">
+                    <input id="manualLabelTextInput" type="text" value="Living Room" aria-label="Manual label text" />
+                    <button id="addLabelBoxBtn" class="secondary-button compact" type="button">
+                      Add Label Box
+                    </button>
+                    <button id="autoDetectLabelsBtn" class="secondary-button compact" type="button">
+                      Auto Detect Labels
+                    </button>
+                  </div>
+                  <div class="label-image-editor" id="labelImageEditor" hidden>
+                    <img id="labelEditorImage" alt="Manual label placement preview" />
+                    <div id="labelEditorOverlay" class="label-editor-overlay"></div>
+                  </div>
                   <textarea id="manualLabelsJson" spellcheck="false"></textarea>
                   <div class="manual-label-actions">
                     <button id="saveManualLabelsBtn" class="secondary-button compact" type="button">

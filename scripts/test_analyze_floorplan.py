@@ -29,29 +29,11 @@ def main() -> int:
     args = parser.parse_args()
 
     use_gemini = os.getenv("USE_GEMINI_ANALYSIS", "").lower() == "true"
-    use_openrouter = os.getenv("USE_OPENROUTER_ANALYSIS", "").lower() == "true"
-    use_openai = os.getenv("USE_OPENAI_ANALYSIS", "").lower() == "true"
-
-    if use_gemini:
-        if not os.getenv("GEMINI_API_KEY"):
-            print("Error: GEMINI_API_KEY is missing. Set it before running the Gemini analysis test.", file=sys.stderr)
-            return 1
-    elif use_openrouter:
-        if not os.getenv("OPENROUTER_API_KEY"):
-            print(
-                "Error: OPENROUTER_API_KEY is missing. Set it before running the OpenRouter analysis test.",
-                file=sys.stderr,
-            )
-            return 1
-    elif use_openai:
-        if not os.getenv("OPENAI_API_KEY"):
-            print("Error: OPENAI_API_KEY is missing. Set it before running the OpenAI analysis test.", file=sys.stderr)
-            return 1
-    else:
-        print(
-            "Error: set USE_GEMINI_ANALYSIS=true, USE_OPENROUTER_ANALYSIS=true, or USE_OPENAI_ANALYSIS=true before running this script.",
-            file=sys.stderr,
-        )
+    if not use_gemini:
+        print("Error: set USE_GEMINI_ANALYSIS=true before running this script.", file=sys.stderr)
+        return 1
+    if not os.getenv("GEMINI_API_KEY"):
+        print("Error: GEMINI_API_KEY is missing. Set it before running the Gemini analysis test.", file=sys.stderr)
         return 1
 
     image_path = Path(args.image_path)

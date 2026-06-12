@@ -45,8 +45,43 @@ def build_manual_labels_from_analysis(
     return {"version": "1.0", "labels": labels}
 
 
+def build_manual_labels_from_detected_boxes(detected_label_boxes: dict) -> dict:
+    labels = []
+    boxes = detected_label_boxes.get("boxes", []) if isinstance(detected_label_boxes, dict) else []
+    for index, box in enumerate(boxes, start=1):
+        bbox = box.get("bbox") if isinstance(box, dict) else None
+        if not _valid_bbox(bbox):
+            continue
+        labels.append(
+            {
+                "id": f"label_{index}",
+                "text": "",
+                "bbox": [int(value) for value in bbox],
+                "locked": False,
+                "needs_text": True,
+            }
+        )
+
+    return {
+        "version": "1.0",
+        "source": "detected_label_boxes",
+        "needs_manual_review": True,
+        "labels": labels,
+    }
+
+
 def empty_manual_labels() -> dict:
-    return {"version": "1.0", "labels": []}
+    return {"version": "1.0", "source": "manual", "needs_manual_review": True, "labels": []}
+
+
+def empty_detected_label_boxes() -> dict:
+    return {
+        "method": "opencv_label_rectangle_detection",
+        "image_width": None,
+        "image_height": None,
+        "boxes": [],
+        "warnings": ["detected_label_boxes.json does not exist."],
+    }
 
 
 def _resolve_box(
@@ -83,3 +118,13 @@ def _resolve_box(
 
 def _slug(value: str) -> str:
     return "".join(char if char.isalnum() else "_" for char in value.lower()).strip("_") or "room"
+
+
+def _valid_bbox(value) -> bool:
+    if not isinstance(value, list) or len(value) != 4:
+        return False
+    try:
+        x0, y0, x1, y1 = [float(item) for item in value]
+    except (TypeError, ValueError):
+        return False
+    return x1 > x0 and y1 > y0

@@ -1,17 +1,13 @@
 from __future__ import annotations
 
-import base64
 import json
 import logging
-import os
 import shutil
 import socket
 import time
-import urllib.request
 from pathlib import Path
 
 from fastapi import HTTPException
-from openai import OpenAI
 from PIL import Image, ImageDraw, ImageFont
 import requests
 
@@ -79,113 +75,6 @@ class StubImageProvider(ImageProvider):
                 saved_image.convert("RGB").save(output_path, format="PNG")
         except OSError as exc:
             raise HTTPException(status_code=500, detail="failed to normalize stub preview image") from exc
-
-        return output_path
-
-
-class OpenAIImageProvider(ImageProvider):
-    def generate(
-        self,
-        prompt: str,
-        floorplan_path: Path,
-        output_path: Path,
-        input_image_url: str | None = None,
-    ) -> Path:
-        settings = get_settings()
-        if not settings.openai_api_key:
-            raise HTTPException(
-                status_code=500,
-                detail="OpenAI image generation is enabled but OPENAI_API_KEY is missing.",
-            )
-
-        if not floorplan_path.exists():
-            raise HTTPException(status_code=404, detail="floorplan image not found")
-
-        output_path.parent.mkdir(parents=True, exist_ok=True)
-        client = OpenAI(api_key=settings.openai_api_key)
-
-        try:
-            with floorplan_path.open("rb") as image_file:
-                response = client.images.edit(
-                    model=settings.openai_image_model,
-                    image=image_file,
-                    prompt=prompt,
-                    size="auto",
-                    quality="auto",
-                )
-        except Exception as exc:
-            raise HTTPException(status_code=502, detail=f"OpenAI image generation failed: {exc}") from exc
-
-        image_data = getattr(response, "data", None) or []
-        if not image_data:
-            raise HTTPException(status_code=502, detail="OpenAI returned no generated image data.")
-
-        b64_json = getattr(image_data[0], "b64_json", None)
-        if not b64_json:
-            raise HTTPException(status_code=502, detail="OpenAI returned an empty image payload.")
-
-        try:
-            output_path.write_bytes(base64.b64decode(b64_json))
-        except Exception as exc:
-            raise HTTPException(status_code=500, detail="failed to save OpenAI generated image") from exc
-
-        return output_path
-
-
-class FluxImageProvider(ImageProvider):
-    def generate(
-        self,
-        prompt: str,
-        floorplan_path: Path,
-        output_path: Path,
-        input_image_url: str | None = None,
-    ) -> Path:
-        settings = get_settings()
-        if not settings.fal_api_key:
-            raise HTTPException(
-                status_code=500,
-                detail="Flux image generation is enabled but FAL_API_KEY is missing.",
-            )
-
-        if not floorplan_path.exists():
-            raise HTTPException(status_code=404, detail="floorplan image not found")
-
-        output_path.parent.mkdir(parents=True, exist_ok=True)
-
-        try:
-            os.environ.setdefault("FAL_KEY", settings.fal_api_key)
-            import fal_client
-        except Exception as exc:  # pragma: no cover - import depends on installed package
-            raise HTTPException(status_code=500, detail=f"fal-client is not available: {exc}") from exc
-
-        try:
-            image_url = fal_client.upload_file(floorplan_path)
-            result = fal_client.subscribe(
-                settings.flux_model,
-                arguments={
-                    "prompt": prompt,
-                    "image_url": image_url,
-                },
-            )
-        except Exception as exc:
-            raise HTTPException(status_code=502, detail=f"Flux image generation failed: {exc}") from exc
-
-        try:
-            image_items = None
-            if isinstance(result, dict):
-                image_items = result.get("images")
-            else:
-                image_items = getattr(result, "images", None)
-            if not image_items:
-                raise ValueError("no generated image returned")
-            first_image = image_items[0]
-            generated_url = first_image["url"] if isinstance(first_image, dict) else getattr(first_image, "url", None)
-            if not generated_url:
-                raise ValueError("generated image URL missing")
-            with urllib.request.urlopen(generated_url) as response:
-                output_path.write_bytes(response.read())
-        except Exception as exc:
-            raise HTTPException(status_code=502, detail=f"Flux image download failed: {exc}") from exc
 
         return output_path
 
@@ -678,13 +567,9 @@ def get_image_provider() -> ImageProvider:
     provider_name = settings.image_provider.strip().lower()
     if provider_name == "stub":
         return StubImageProvider()
-    if provider_name == "openai":
-        return OpenAIImageProvider()
-    if provider_name == "flux":
-        return FluxImageProvider()
     if provider_name == "fluxapi":
         return FluxAPIImageProvider()
     raise HTTPException(
         status_code=500,
-        detail=f"Unsupported image provider: {settings.image_provider}. Expected 'stub', 'openai', 'flux', or 'fluxapi'.",
+        detail=f"Unsupported image provider: {settings.image_provider}. Expected 'stub' or 'fluxapi'.",
     )

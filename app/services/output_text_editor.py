@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+import json
 
 from fastapi import HTTPException
 from PIL import Image, ImageDraw, ImageFont
@@ -194,6 +195,71 @@ def apply_manual_labels_to_output(output_image_path: Path, manual_labels: dict) 
     return metadata
 
 
+def apply_manual_labels(
+    image_path: Path,
+    manual_labels_path: Path,
+    max_padding: int = 4,
+) -> dict:
+    if not image_path.exists():
+        raise HTTPException(status_code=404, detail="generated output image not found for manual labels")
+    if not manual_labels_path.exists():
+        raise HTTPException(status_code=404, detail="manual_labels.json not found")
+
+    try:
+        manual_labels = json.loads(manual_labels_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise HTTPException(status_code=422, detail=f"failed to read manual_labels.json: {exc}") from exc
+
+    labels = manual_labels.get("labels", []) if isinstance(manual_labels, dict) else []
+    if not isinstance(labels, list):
+        raise HTTPException(status_code=422, detail="manual_labels.labels must be a list")
+
+    padding = max(0, min(int(max_padding), 4))
+    metadata = {
+        "method": "manual_labels",
+        "labels_processed": 0,
+        "labels_skipped": 0,
+        "warnings": [],
+    }
+
+    try:
+        with Image.open(image_path) as image:
+            editable = image.convert("RGB")
+            draw = ImageDraw.Draw(editable)
+            image_width, image_height = editable.size
+
+            for label in labels:
+                label_id = str(label.get("id") or "label") if isinstance(label, dict) else "label"
+                text = str(label.get("text") or "").strip() if isinstance(label, dict) else ""
+                if not text:
+                    metadata["labels_skipped"] += 1
+                    metadata["warnings"].append(f"Skipped {label_id}: text is empty.")
+                    continue
+
+                box = _manual_bbox(label.get("bbox"), image_width, image_height) if isinstance(label, dict) else None
+                if not box:
+                    metadata["labels_skipped"] += 1
+                    metadata["warnings"].append(f"Skipped {label_id}: bbox is invalid.")
+                    continue
+
+                inner_box = _inset_box(box, padding)
+                text_plan = _fit_text(draw, text, inner_box)
+                if not text_plan:
+                    metadata["labels_skipped"] += 1
+                    metadata["warnings"].append(f"Skipped {label_id}: text does not fit in bbox.")
+                    continue
+
+                draw.rounded_rectangle(inner_box, radius=5, fill=(255, 253, 248), outline=(229, 223, 214), width=1)
+                _draw_centered_lines(draw, text_plan["lines"], inner_box, text_plan["font"])
+                metadata["labels_processed"] += 1
+
+            editable.save(image_path, format="PNG")
+    except OSError as exc:
+        raise HTTPException(status_code=500, detail=f"failed to apply manual labels: {exc}") from exc
+
+    return metadata
+
+
 def _build_label_targets(analysis: FloorplanAnalysis) -> list[dict]:
     targets = []
     for room in analysis.rooms:
@@ -226,6 +292,74 @@ def _normalize_manual_label(label: dict) -> dict:
         "font_size": int(_coerce_number(label.get("font_size"), default=28)),
         "align": str(label.get("align") or "center").strip().lower(),
     }
+
+
+def _manual_bbox(value, image_width: int, image_height: int) -> tuple[int, int, int, int] | None:
+    if not isinstance(value, list) or len(value) != 4:
+        return None
+    try:
+        x0, y0, x1, y1 = [float(item) for item in value]
+    except (TypeError, ValueError):
+        return None
+    left = max(0, min(image_width - 1, int(round(min(x0, x1)))))
+    top = max(0, min(image_height - 1, int(round(min(y0, y1)))))
+    right = max(0, min(image_width, int(round(max(x0, x1)))))
+    bottom = max(0, min(image_height, int(round(max(y0, y1)))))
+    if right <= left or bottom <= top:
+        return None
+    return left, top, right, bottom
+
+
+def _inset_box(box: tuple[int, int, int, int], padding: int) -> tuple[int, int, int, int]:
+    x0, y0, x1, y1 = box
+    if x1 - x0 <= padding * 2 or y1 - y0 <= padding * 2:
+        return box
+    return x0 + padding, y0 + padding, x1 - padding, y1 - padding
+
+
+def _fit_text(draw: ImageDraw.ImageDraw, text: str, box: tuple[int, int, int, int]) -> dict | None:
+    x0, y0, x1, y1 = box
+    max_width = max(1, x1 - x0 - 6)
+    max_height = max(1, y1 - y0 - 4)
+    for font_size in range(min(42, max_height), 7, -1):
+        font = _load_font(font_size)
+        for lines in ([text], _wrap_two_lines(text)):
+            if not lines:
+                continue
+            width, height = _lines_size(draw, lines, font)
+            if width <= max_width and height <= max_height:
+                return {"lines": lines, "font": font}
+    return None
+
+
+def _wrap_two_lines(text: str) -> list[str] | None:
+    words = text.split()
+    if len(words) < 2:
+        return None
+    midpoint = len(words) // 2
+    return [" ".join(words[:midpoint]), " ".join(words[midpoint:])]
+
+
+def _lines_size(draw: ImageDraw.ImageDraw, lines: list[str], font) -> tuple[int, int]:
+    widths = []
+    heights = []
+    for line in lines:
+        bbox = draw.textbbox((0, 0), line, font=font)
+        widths.append(bbox[2] - bbox[0])
+        heights.append(bbox[3] - bbox[1])
+    return max(widths or [0]), sum(heights) + max(0, len(lines) - 1) * 4
+
+
+def _draw_centered_lines(draw: ImageDraw.ImageDraw, lines: list[str], box: tuple[int, int, int, int], font) -> None:
+    x0, y0, x1, y1 = box
+    _, total_height = _lines_size(draw, lines, font)
+    current_y = y0 + ((y1 - y0) - total_height) / 2
+    for line in lines:
+        bbox = draw.textbbox((0, 0), line, font=font)
+        line_width = bbox[2] - bbox[0]
+        line_height = bbox[3] - bbox[1]
+        draw.text((x0 + ((x1 - x0) - line_width) / 2, current_y), line, fill=(45, 38, 30), font=font)
+        current_y += line_height + 4
 
 
 def _manual_label_box(label: dict, image_width: int, image_height: int) -> tuple[int, int, int, int] | None:
