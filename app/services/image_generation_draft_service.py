@@ -19,6 +19,7 @@ from app.schemas.run import (
     ImageGenerationRequestPreviewArtifact,
     RunMetadata,
 )
+from app.services.cloudinary_storage_service import CloudinaryStorageService
 
 
 class ImageGenerationDraftService:
@@ -26,6 +27,7 @@ class ImageGenerationDraftService:
         self.storage_dir = storage_dir
         self.storage_runs_dir = storage_runs_dir
         self.settings = get_settings()
+        self.cloudinary_service = CloudinaryStorageService()
 
     def generate_image_draft(
         self,
@@ -65,12 +67,14 @@ class ImageGenerationDraftService:
             structure_reference_path,
         )
         output_info, output_warnings = self.decode_and_save_generated_image(metadata.run_id, provider_response, preview)
+        cloudinary_info, cloudinary_warnings = self.upload_output_images_to_cloudinary(metadata.run_id, output_info)
 
         warnings = self._dedupe_keep_order(
             list(preview.preview_warnings)
             + list(preview.upstream_warnings)
             + provider_warnings
             + output_warnings
+            + cloudinary_warnings
             + ["Human visual QA is still required for this draft generation."]
             + ["Postprocess was required to reach final delivery size 1200x1200."]
         )
@@ -85,6 +89,7 @@ class ImageGenerationDraftService:
             payload,
             provider_response,
             output_info,
+            cloudinary_info,
             warnings,
             [],
             selected_reference_images,
@@ -483,8 +488,11 @@ class ImageGenerationDraftService:
         quality = postprocess["quality"]
         return {
             "raw_image_path": self._relative_storage_path(raw_path),
+            "raw_image_preview_url": f"/{self._relative_storage_path(raw_path)}",
             "draft_image_path": self._relative_storage_path(final_path),
             "draft_image_preview_url": f"/{self._relative_storage_path(final_path)}",
+            "output_url": f"/{self._relative_storage_path(final_path)}",
+            "preview_url": f"/{self._relative_storage_path(final_path)}",
             "width": quality["width"],
             "height": quality["height"],
             "format": "png",
@@ -531,6 +539,7 @@ class ImageGenerationDraftService:
         payload: dict,
         openai_response: dict,
         output_info: dict,
+        cloudinary_info: dict,
         warnings: list[str],
         errors: list[str],
         selected_reference_images: list[dict],
@@ -573,9 +582,14 @@ class ImageGenerationDraftService:
             },
             outputs={
                 "raw_image_path": output_info["raw_image_path"],
+                "raw_image_preview_url": output_info.get("raw_image_preview_url"),
                 "draft_image_path": output_info["draft_image_path"],
                 "draft_image_preview_url": output_info["draft_image_preview_url"],
                 "output_image_path": output_info["draft_image_path"],
+                "output_url": output_info.get("output_url"),
+                "preview_url": output_info.get("preview_url"),
+                "cloudinary_url": cloudinary_info.get("draft", {}).get("secure_url"),
+                "public_output_url": cloudinary_info.get("draft", {}).get("secure_url"),
                 "width": output_info["width"],
                 "height": output_info["height"],
                 "format": output_info["format"],
@@ -600,6 +614,11 @@ class ImageGenerationDraftService:
             interior_reference_count=preview.interior_reference_count,
             selected_interior_filenames=preview.selected_interior_filenames,
             interior_guidance_summary=preview.interior_guidance_summary,
+            cloudinary=cloudinary_info,
+            public_output_url=cloudinary_info.get("draft", {}).get("secure_url"),
+            cloudinary_url=cloudinary_info.get("draft", {}).get("secure_url"),
+            output_url=output_info.get("output_url"),
+            preview_url=output_info.get("preview_url"),
             warnings=self._dedupe_keep_order(warnings),
             errors=self._dedupe_keep_order(errors),
         )
@@ -621,6 +640,10 @@ class ImageGenerationDraftService:
 
     def build_metadata_updates(self, metadata: RunMetadata, artifact: ImageGenerationDraftArtifact) -> dict:
         now = datetime.now(timezone.utc)
+        cloudinary = artifact.cloudinary if isinstance(artifact.cloudinary, dict) else {}
+        cloudinary_warnings = list(cloudinary.get("warnings") or [])
+        public_output_url = artifact.public_output_url or artifact.cloudinary_url
+        local_output_preview_url = artifact.preview_url or artifact.output_url or artifact.outputs.get("draft_image_preview_url")
         return {
             "status": "image_generation_draft_created",
             "run_status": "image_generation_draft_created",
@@ -638,6 +661,14 @@ class ImageGenerationDraftService:
                 "next_phase": "phase_5d_visual_qa",
             },
             "image_generation_draft_path": self._relative_artifact_path(metadata.run_id, "image_generation_draft.json"),
+            "cloudinary_summary": {
+                "enabled": bool(cloudinary.get("enabled")),
+                "draft_uploaded": bool(cloudinary.get("draft", {}).get("uploaded")),
+                "draft_secure_url": cloudinary.get("draft", {}).get("secure_url"),
+                "raw_draft_uploaded": bool(cloudinary.get("raw_draft", {}).get("uploaded")),
+                "warnings_count": len(cloudinary_warnings),
+            },
+            "public_output_url": public_output_url,
             "image_generation_draft_summary": ImageGenerationDraftSummary(
                 draft_status=artifact.draft_status,
                 provider_name=str(artifact.provider.get("provider_name") or "openai"),
@@ -645,7 +676,7 @@ class ImageGenerationDraftService:
                 api_call_performed=bool(artifact.provider.get("api_call_performed")),
                 provider_size=str(artifact.request.get("provider_size") or self.settings.openai_image_provider_size),
                 final_delivery_size=str(artifact.request.get("final_delivery_size") or self.settings.openai_image_final_output_size),
-                draft_image_preview_url=artifact.outputs.get("draft_image_preview_url"),
+                draft_image_preview_url=public_output_url or local_output_preview_url,
                 needs_human_review=bool(artifact.quality.get("needs_human_review", True)),
                 ready_for_visual_qa=bool(artifact.quality.get("ready_for_visual_qa", False)),
                 warnings_count=len(artifact.warnings),
@@ -702,6 +733,86 @@ class ImageGenerationDraftService:
             "total_tokens": usage.get("total_tokens"),
             "raw_usage_available": True,
         }
+
+    def upload_output_images_to_cloudinary(self, run_id: str, output_info: dict) -> tuple[dict, list[str]]:
+        cloudinary_info: dict = {
+            "enabled": bool(self.settings.cloudinary_enabled),
+            "draft": {
+                "enabled": bool(self.settings.cloudinary_enabled),
+                "uploaded": False,
+                "reason": "cloudinary_disabled" if not self.settings.cloudinary_enabled else "draft_upload_not_attempted",
+            },
+            "raw_draft": {
+                "enabled": bool(self.settings.cloudinary_enabled),
+                "uploaded": False,
+                "reason": "cloudinary_disabled" if not self.settings.cloudinary_enabled else "raw_draft_upload_not_attempted",
+            },
+            "warnings": [],
+        }
+        warnings: list[str] = []
+
+        if not self.settings.cloudinary_enabled:
+            return cloudinary_info, warnings
+
+        if not self.settings.cloudinary_upload_drafts:
+            cloudinary_info["draft"] = {
+                "enabled": True,
+                "uploaded": False,
+                "reason": "cloudinary_upload_drafts_disabled",
+            }
+            cloudinary_info["raw_draft"] = {
+                "enabled": True,
+                "uploaded": False,
+                "reason": "cloudinary_upload_drafts_disabled",
+            }
+            return cloudinary_info, warnings
+
+        upload_targets = (
+            ("draft", output_info.get("draft_image_path")),
+            ("raw_draft", output_info.get("raw_image_path")),
+        )
+        for asset_kind, relative_storage_path in upload_targets:
+            local_path = self._resolve_output_local_path(relative_storage_path)
+            if local_path is None or not local_path.exists():
+                cloudinary_info[asset_kind] = {
+                    "enabled": True,
+                    "uploaded": False,
+                    "reason": "local_output_missing",
+                }
+                continue
+            try:
+                cloudinary_info[asset_kind] = self.cloudinary_service.upload_run_image(
+                    run_id=run_id,
+                    local_path=local_path,
+                    asset_kind=asset_kind,
+                )
+            except HTTPException as exc:
+                message = exc.detail if isinstance(exc.detail, str) else "Cloudinary upload failed"
+                warning = f"Cloudinary upload failed: {message}"
+                cloudinary_info["warnings"].append(warning)
+                cloudinary_info[asset_kind] = {
+                    "enabled": True,
+                    "uploaded": False,
+                    "reason": "upload_failed",
+                    "error": message,
+                }
+                if self.settings.cloudinary_upload_required:
+                    raise HTTPException(status_code=502, detail=warning) from exc
+                warnings.append(warning)
+
+        return cloudinary_info, warnings
+
+    def _resolve_output_local_path(self, relative_storage_path: str | None) -> Path | None:
+        if not str(relative_storage_path or "").strip():
+            return None
+        storage_relative = str(relative_storage_path).replace("\\", "/").strip().lstrip("/")
+        base_root = self.storage_dir.parent.resolve()
+        candidate = (base_root / storage_relative).resolve()
+        try:
+            candidate.relative_to(base_root)
+        except ValueError:
+            return None
+        return candidate
 
     @staticmethod
     def _parse_size(size: str) -> tuple[int, int]:

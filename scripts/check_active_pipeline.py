@@ -95,6 +95,13 @@ def main() -> int:
         getattr(settings, "use_gemini_analysis", False)
     )
     image_provider_openai_only = True
+    cloudinary_enabled = bool(getattr(settings, "cloudinary_enabled", False))
+    cloudinary_config_present = bool(
+        str(getattr(settings, "cloudinary_cloud_name", "") or "").strip()
+        and str(getattr(settings, "cloudinary_api_key", "") or "").strip()
+        and str(getattr(settings, "cloudinary_api_secret", "") or "").strip()
+    )
+    cloudinary_is_storage_only = True
     gemini_active = str(getattr(settings, "vision_provider", "")).strip().lower() == "gemini" or bool(
         getattr(settings, "use_gemini_analysis", False)
     )
@@ -124,6 +131,9 @@ def main() -> int:
     print(f"vision_provider_effective: {str(settings.vision_provider).strip().lower() or 'openai'}")
     print(f"analysis_provider_openai_only: {analysis_provider_openai_only}")
     print(f"image_provider_openai_only: {image_provider_openai_only}")
+    print(f"cloudinary_enabled: {cloudinary_enabled}")
+    print(f"cloudinary_config_present: {cloudinary_config_present}")
+    print(f"cloudinary_is_storage_only: {cloudinary_is_storage_only}")
     print(f"gemini_active: {gemini_active}")
     print(f"fluxapi_active: {bool(fluxapi_active_matches)}")
     print(f"fal_active: {bool(fal_active_matches)}")

@@ -215,13 +215,20 @@ async function readCheckedJson(response, label) {
 
   if (!response.ok) {
     const detail = Array.isArray(payload.detail) ? payload.detail[0] : payload.detail;
-    throw new Error(detail || `${label} failed with HTTP ${response.status}`);
+    const message =
+      typeof detail === "string"
+        ? detail
+        : detail && typeof detail === "object" && detail.message
+          ? detail.message
+          : `${label} failed with HTTP ${response.status}`;
+    throw new Error(message);
   }
   return payload;
 }
 
 function resolveDraftImageUrl(draft, runId) {
-  const rawPreview =
+  const preferredUrl =
+    pickDisplayImageUrl(draft) ||
     draft?.outputs?.generated_draft_raw_preview_url ||
     draft?.outputs?.generated_draft_raw_url ||
     draft?.outputs?.raw_image_preview_url ||
@@ -233,7 +240,7 @@ function resolveDraftImageUrl(draft, runId) {
     draft?.output_preview_url ||
     `/storage/runs/${runId}/artifacts/generated_draft_raw.png`;
 
-  return toUrl(rawPreview);
+  return toUrl(preferredUrl);
 }
 
 function fallbackDraftUrl(runId) {
@@ -464,7 +471,7 @@ function getInteriorPhotoCount(payload) {
 
 function renderOutputUrl(imageUrl) {
   outputUrlLink.href = imageUrl;
-  outputUrlLink.textContent = imageUrl;
+  outputUrlLink.textContent = `${isHostedOutputUrl(imageUrl) ? "Hosted output URL" : "Local output URL"}: ${imageUrl}`;
   outputUrlLink.hidden = false;
 }
 
@@ -700,6 +707,27 @@ function toUrl(path) {
   if (!path) return "";
   if (/^https?:\/\//.test(path)) return path;
   return path.startsWith("/") ? path : `/${path}`;
+}
+
+function pickDisplayImageUrl(result) {
+  if (!result || typeof result !== "object") return "";
+  return (
+    result.public_output_url ||
+    result.cloudinary_url ||
+    result.cloudinary?.draft?.secure_url ||
+    result.outputs?.public_output_url ||
+    result.outputs?.cloudinary_url ||
+    result.outputs?.output_preview_url ||
+    result.outputs?.draft_image_preview_url ||
+    result.output_preview_url ||
+    result.output_url ||
+    result.preview_url ||
+    ""
+  );
+}
+
+function isHostedOutputUrl(url) {
+  return /^https:\/\/res\.cloudinary\.com\//.test(String(url || ""));
 }
 
 function cssEscape(value) {

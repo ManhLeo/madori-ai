@@ -477,6 +477,8 @@ class RunService:
                 "pipeline": updates.get("pipeline", metadata.pipeline),
                 "image_generation_draft_path": updates.get("image_generation_draft_path"),
                 "image_generation_draft_summary": updates.get("image_generation_draft_summary"),
+                "cloudinary_summary": updates.get("cloudinary_summary", metadata.cloudinary_summary),
+                "public_output_url": updates.get("public_output_url", metadata.public_output_url),
             }
         )
         metadata_path = self._safe_run_dir(metadata.run_id) / "run_metadata.json"

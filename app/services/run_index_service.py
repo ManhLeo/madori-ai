@@ -191,24 +191,8 @@ class RunIndexService:
     def index_run(self, metadata: RunMetadata) -> RunMetadataSummary:
         run_dir = self._safe_run_dir(metadata.run_id)
         artifact_entries = self._collect_artifacts(metadata, run_dir)
-        artifact_index = RunArtifactIndex(
-            run_id=metadata.run_id,
-            generated_at=datetime.now(timezone.utc),
-            artifacts=artifact_entries,
-            checks={
-                "run_metadata_present": True,
-                "floorplan_present": self._artifact_exists(artifact_entries, "floorplan_source"),
-                "artifact_index_written": True,
-            },
-            warnings=[],
-            errors=[],
-        )
-
         artifacts_dir = self._artifacts_dir(metadata, run_dir)
         artifacts_dir.mkdir(parents=True, exist_ok=True)
-        artifact_index_path = artifacts_dir / "artifact_index.json"
-        self._write_json(artifact_index_path, artifact_index.model_dump(mode="json"))
-
         validated_artifact = self._load_optional_validated_artifact(run_dir)
         analysis_artifact = self._load_optional_analysis_artifact(run_dir)
         interior_analysis_artifact = self._load_optional_interior_analysis_artifact(run_dir)
@@ -223,6 +207,21 @@ class RunIndexService:
         image_generation_request_preview_artifact = self._load_optional_image_generation_request_preview_artifact(run_dir)
         image_generation_draft_artifact = self._load_optional_image_generation_draft_artifact(run_dir)
         structure_locked_composite_artifact = self._load_optional_structure_locked_composite_artifact(run_dir)
+        self._apply_image_generation_draft_external_urls(artifact_entries, image_generation_draft_artifact)
+        artifact_index = RunArtifactIndex(
+            run_id=metadata.run_id,
+            generated_at=datetime.now(timezone.utc),
+            artifacts=artifact_entries,
+            checks={
+                "run_metadata_present": True,
+                "floorplan_present": self._artifact_exists(artifact_entries, "floorplan_source"),
+                "artifact_index_written": True,
+            },
+            warnings=[],
+            errors=[],
+        )
+        artifact_index_path = artifacts_dir / "artifact_index.json"
+        self._write_json(artifact_index_path, artifact_index.model_dump(mode="json"))
         input_summary = self._build_input_summary(metadata)
         pipeline_summary = self._build_pipeline_summary(metadata, artifact_entries)
         analysis_summary = self._build_analysis_summary(validated_artifact, analysis_artifact)
@@ -797,6 +796,7 @@ class RunIndexService:
         if metadata.image_generation_draft_summary is not None:
             return metadata.image_generation_draft_summary
         if artifact is not None:
+            preview_url = artifact.public_output_url or artifact.cloudinary_url or artifact.outputs.get("draft_image_preview_url")
             return ImageGenerationDraftSummary(
                 draft_status=artifact.draft_status,
                 provider_name=str(artifact.provider.get("provider_name") or "openai"),
@@ -804,13 +804,36 @@ class RunIndexService:
                 api_call_performed=bool(artifact.provider.get("api_call_performed")),
                 provider_size=str(artifact.request.get("provider_size") or "1024x1024"),
                 final_delivery_size=str(artifact.request.get("final_delivery_size") or "1200x1200"),
-                draft_image_preview_url=artifact.outputs.get("draft_image_preview_url"),
+                draft_image_preview_url=preview_url,
                 needs_human_review=bool(artifact.quality.get("needs_human_review", True)),
                 ready_for_visual_qa=bool(artifact.quality.get("ready_for_visual_qa", False)),
                 warnings_count=len(artifact.warnings),
                 errors_count=len(artifact.errors),
             )
         return None
+
+    def _apply_image_generation_draft_external_urls(
+        self,
+        entries: list[ArtifactIndexEntry],
+        artifact: ImageGenerationDraftArtifact | None,
+    ) -> None:
+        if artifact is None:
+            return
+
+        draft_cloudinary_url = artifact.cloudinary.get("draft", {}).get("secure_url") if isinstance(artifact.cloudinary, dict) else None
+        raw_cloudinary_url = artifact.cloudinary.get("raw_draft", {}).get("secure_url") if isinstance(artifact.cloudinary, dict) else None
+        public_output_url = artifact.public_output_url or draft_cloudinary_url
+
+        for entry in entries:
+            if entry.key == "draft_output":
+                entry.external_url = public_output_url
+                entry.cloudinary_secure_url = draft_cloudinary_url
+            elif entry.key == "generated_draft_raw":
+                entry.external_url = raw_cloudinary_url
+                entry.cloudinary_secure_url = raw_cloudinary_url
+            elif entry.key == "image_generation_draft":
+                entry.external_url = public_output_url
+                entry.cloudinary_secure_url = draft_cloudinary_url
 
     def _build_structure_locked_composite_summary(
         self,
@@ -863,6 +886,8 @@ class RunIndexService:
             filename=path.name,
             relative_path=relative_path,
             preview_url=preview_url,
+            external_url=None,
+            cloudinary_secure_url=None,
             size_bytes=size_bytes,
             content_type=self.ARTIFACT_CONTENT_TYPES.get(suffix),
             type=inferred_type,

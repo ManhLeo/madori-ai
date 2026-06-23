@@ -990,6 +990,11 @@ class ImageGenerationDraftArtifact(BaseModel):
     interior_reference_count: int = 0
     selected_interior_filenames: list[str] = Field(default_factory=list)
     interior_guidance_summary: dict = Field(default_factory=dict)
+    cloudinary: dict = Field(default_factory=dict)
+    public_output_url: str | None = None
+    cloudinary_url: str | None = None
+    output_url: str | None = None
+    preview_url: str | None = None
     warnings: list[str] = Field(default_factory=list)
     errors: list[str] = Field(default_factory=list)
 
@@ -1049,6 +1054,8 @@ class ArtifactIndexEntry(BaseModel):
     filename: str
     relative_path: str
     preview_url: str | None = None
+    external_url: str | None = None
+    cloudinary_secure_url: str | None = None
     size_bytes: int | None = None
     content_type: str | None = None
     type: str = "unknown"
@@ -1215,6 +1222,8 @@ class RunMetadata(BaseModel):
     image_generation_request_preview_summary: ImageGenerationRequestPreviewSummary | None = None
     image_generation_draft_path: str | None = None
     image_generation_draft_summary: ImageGenerationDraftSummary | None = None
+    cloudinary_summary: dict = Field(default_factory=dict)
+    public_output_url: str | None = None
     structure_locked_composite_path: str | None = None
     structure_locked_composite_summary: StructureLockedCompositeSummary | None = None
     last_indexed_at: datetime | None = None

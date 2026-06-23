@@ -15,6 +15,24 @@ OpenAI analysis uses `OPENAI_ANALYSIS_MODEL`, defaulting to `gpt-4.1-mini`. It i
 
 OpenAI image generation remains separate and continues to use `OPENAI_IMAGE_MODEL` plus the image-generation guard settings.
 
+## Active Providers
+
+Semantic analysis:
+- OpenAI only
+
+Image generation:
+- OpenAI only
+
+Output hosting:
+- Cloudinary optional, storage-only
+
+Removed from the active flow:
+- FluxAPI
+- fal.ai
+- Gemini analysis
+- OCR
+- legacy `/api/generate`
+
 Useful config:
 
 ```text
@@ -900,12 +918,21 @@ OpenAI is the only supported semantic provider in the active flow. Gemini is dep
 ### Output Storage
 
 ```env
+CLOUDINARY_ENABLED=true
 CLOUDINARY_CLOUD_NAME=your_cloud_name
 CLOUDINARY_API_KEY=your_key
 CLOUDINARY_API_SECRET=your_secret
+CLOUDINARY_FOLDER=madori/runs
 ```
 
-Cloudinary is optional and is used only for runtime output hosting when configured.
+Cloudinary is optional and is used only for generated output image hosting when configured. It is not an image generation provider.
+
+### Cloudinary Output Hosting
+
+- Use Cloudinary only for public hosting of generated staged-run outputs such as `image_generation_draft`.
+- The backend uploads the local draft image after OpenAI generation succeeds. Local files remain in `storage/runs/{run_id}`.
+- The frontend does not need Cloudinary credentials and should only consume the public URLs returned by the backend.
+- If Cloudinary keys were ever exposed, rotate them before production deployment.
 
 ## Run Locally
 
