@@ -990,6 +990,7 @@ class ImageGenerationDraftArtifact(BaseModel):
     interior_reference_count: int = 0
     selected_interior_filenames: list[str] = Field(default_factory=list)
     interior_guidance_summary: dict = Field(default_factory=dict)
+    openai_input_images: list[dict] = Field(default_factory=list)
     cloudinary: dict = Field(default_factory=dict)
     public_output_url: str | None = None
     cloudinary_url: str | None = None

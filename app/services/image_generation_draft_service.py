@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import base64
 import json
-import mimetypes
 from contextlib import ExitStack
 from datetime import datetime, timezone
 from pathlib import Path
@@ -59,11 +58,12 @@ class ImageGenerationDraftService:
             preview,
             selected_reference_images,
         )
+        openai_input_images, input_warnings = self.validate_openai_input_images(selected_reference_files)
         payload = self.build_openai_image_request(preview, request, metadata)
         provider_response, provider_warnings = self.call_openai_image_api(
             payload,
             selected_reference_images,
-            selected_reference_files,
+            openai_input_images,
             structure_reference_path,
         )
         output_info, output_warnings = self.decode_and_save_generated_image(metadata.run_id, provider_response, preview)
@@ -72,6 +72,7 @@ class ImageGenerationDraftService:
         warnings = self._dedupe_keep_order(
             list(preview.preview_warnings)
             + list(preview.upstream_warnings)
+            + input_warnings
             + provider_warnings
             + output_warnings
             + cloudinary_warnings
@@ -93,6 +94,7 @@ class ImageGenerationDraftService:
             warnings,
             [],
             selected_reference_images,
+            openai_input_images,
             draft_status,
         )
         self.write_image_generation_draft(metadata.run_id, artifact)
@@ -380,14 +382,13 @@ class ImageGenerationDraftService:
                 for image_info in selected_image_files:
                     image_path = Path(image_info["path"])
                     file_handle = stack.enter_context(image_path.open("rb"))
-                    mime_type = self._guess_mime_type(image_path)
                     multipart_files.append(
                         (
                             "image[]",
                             (
-                                image_path.name,
+                                str(image_info.get("filename") or image_path.name),
                                 file_handle,
-                                mime_type,
+                                str(image_info["mime_type"]),
                             ),
                         )
                     )
@@ -439,6 +440,85 @@ class ImageGenerationDraftService:
             )
         return resolved
 
+    def validate_openai_input_images(self, selected_reference_files: list[dict]) -> tuple[list[dict], list[str]]:
+        validated: list[dict] = []
+        warnings: list[str] = []
+        for image_info in selected_reference_files:
+            validated_image = self._validate_openai_input_image(image_info)
+            validated.append(validated_image)
+        return validated, warnings
+
+    def _validate_openai_input_image(self, image_info: dict) -> dict:
+        image_path = Path(str(image_info.get("path") or ""))
+        role = str(image_info.get("role") or "reference_image")
+        if not image_path.exists():
+            raise HTTPException(
+                status_code=400,
+                detail={
+                    "error": "invalid_openai_image_input",
+                    "message": "Reference image file does not exist.",
+                    "path": str(image_path),
+                    "detected_mime_type": None,
+                },
+            )
+        try:
+            size_bytes = image_path.stat().st_size
+        except OSError as exc:
+            raise HTTPException(
+                status_code=400,
+                detail={
+                    "error": "invalid_openai_image_input",
+                    "message": "Reference image could not be inspected.",
+                    "path": str(image_path),
+                    "detected_mime_type": None,
+                },
+            ) from exc
+        if size_bytes <= 0:
+            raise HTTPException(
+                status_code=400,
+                detail={
+                    "error": "invalid_openai_image_input",
+                    "message": "Reference image file is empty.",
+                    "path": str(image_path),
+                    "detected_mime_type": None,
+                },
+            )
+
+        try:
+            mime_type = self.detect_image_mime_type(image_path)
+        except ValueError as exc:
+            raise HTTPException(
+                status_code=400,
+                detail={
+                    "error": "invalid_openai_image_input",
+                    "message": "Reference image has unsupported MIME type or extension.",
+                    "path": str(image_path),
+                    "detected_mime_type": "application/octet-stream",
+                },
+            ) from exc
+
+        filename = image_path.name
+        if "." not in filename:
+            raise HTTPException(
+                status_code=400,
+                detail={
+                    "error": "invalid_openai_image_input",
+                    "message": "Reference image filename must include a supported extension.",
+                    "path": str(image_path),
+                    "detected_mime_type": mime_type,
+                },
+            )
+
+        return {
+            **image_info,
+            "path": str(image_path),
+            "filename": filename,
+            "mime_type": mime_type,
+            "role": role,
+            "size_bytes": size_bytes,
+            "supported_by_openai": True,
+        }
+
     def _resolve_reference_image_path(self, run_id: str, image_payload: dict) -> Path | None:
         relative_path = str(image_payload.get("relative_path") or "").strip()
         if not relative_path:
@@ -462,9 +542,15 @@ class ImageGenerationDraftService:
         return None
 
     @staticmethod
-    def _guess_mime_type(path: Path) -> str:
-        guessed, _ = mimetypes.guess_type(path.name)
-        return guessed or "application/octet-stream"
+    def detect_image_mime_type(path: Path) -> str:
+        suffix = path.suffix.lower()
+        if suffix in {".jpg", ".jpeg"}:
+            return "image/jpeg"
+        if suffix == ".png":
+            return "image/png"
+        if suffix == ".webp":
+            return "image/webp"
+        raise ValueError(f"Unsupported image format for OpenAI image input: {path}")
 
     def decode_and_save_generated_image(
         self,
@@ -543,6 +629,7 @@ class ImageGenerationDraftService:
         warnings: list[str],
         errors: list[str],
         selected_reference_images: list[dict],
+        openai_input_images: list[dict],
         draft_status: str,
     ) -> ImageGenerationDraftArtifact:
         usage = self._extract_usage(openai_response)
@@ -614,6 +701,15 @@ class ImageGenerationDraftService:
             interior_reference_count=preview.interior_reference_count,
             selected_interior_filenames=preview.selected_interior_filenames,
             interior_guidance_summary=preview.interior_guidance_summary,
+            openai_input_images=[
+                {
+                    "path": str(item.get("path") or ""),
+                    "filename": str(item.get("filename") or Path(str(item.get("path") or "")).name),
+                    "mime_type": str(item.get("mime_type") or ""),
+                    "role": str(item.get("role") or "reference_image"),
+                }
+                for item in openai_input_images
+            ],
             cloudinary=cloudinary_info,
             public_output_url=cloudinary_info.get("draft", {}).get("secure_url"),
             cloudinary_url=cloudinary_info.get("draft", {}).get("secure_url"),
