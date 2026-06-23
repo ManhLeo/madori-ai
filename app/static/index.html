@@ -139,57 +139,127 @@
         <div class="container generate-grid">
           <div class="generate-copy">
             <p class="section-pill">✦ 生成する</p>
-            <h2>間取り図をアップロード</h2>
+            <h2>アップロードして生成する</h2>
             <p>
-              間取り図をアップロードすると、AIが構造を解析し、家具を配置した日本風イラスト間取り図を生成します。生成後はプレビュー確認とダウンロードができます。
+              間取り図1枚と、必要に応じて内装写真をアップロードしてください。アプリは段階的なパイプラインを実行し、バックエンドの処理が完了するとOpenAIのドラフトを表示します。
             </p>
           </div>
           <form class="generate-card" id="generateForm">
-            <label class="upload-box">
+            <label class="upload-box" for="floorplanInput">
+              <span class="upload-label">Upload Floorplan</span>
               <input id="floorplanInput" type="file" name="floorplan" accept="image/png,image/jpeg,image/webp" required />
-              <span>JPG・PNG・WEBP形式の間取り図を選択</span>
-              <small id="fileName">ファイル未選択</small>
+              <span>Choose one PNG, JPEG, or WEBP floorplan image</span>
+              <small id="fileName">No floorplan selected</small>
             </label>
-            <div class="form-row">
-              <label>
-                スタイル
-                <select name="interior_style">
-                  <option value="japanese_natural">Japanese Natural</option>
-                  <option value="scandinavian">Scandinavian</option>
-                  <option value="modern_minimal">Modern Minimal</option>
-                </select>
-              </label>
-              <label>
-                利用者
-                <select name="target_user">
-                  <option value="single_person">一人暮らし</option>
-                  <option value="couple">カップル</option>
-                  <option value="family_with_child">ファミリー</option>
-                </select>
-              </label>
+
+            <label class="upload-box upload-box-secondary" for="interiorPhotosInput">
+              <span class="upload-label">Upload Interior Photos</span>
+              <input id="interiorPhotosInput" type="file" name="interior_photos" accept="image/png,image/jpeg,image/webp" multiple />
+              <span>Choose multiple room photos, optional but recommended</span>
+              <small id="interiorFileNames">No interior photos selected</small>
+            </label>
+
+            <button class="primary-button full" id="generateButton" type="submit">Generate Draft</button>
+            <p class="form-status" id="formStatus">Ready to create a staged run.</p>
+
+            <section class="asset-preview-section" id="selectedAssetsSection">
+              <div class="asset-preview-header">
+                <h3>Selected Assets</h3>
+              </div>
+
+              <div class="asset-preview-block">
+                <div class="asset-preview-title-row">
+                  <h4>Selected Floorplan Preview</h4>
+                </div>
+                <p class="asset-preview-empty" id="selectedFloorplanEmpty">No floorplan selected.</p>
+                <div class="asset-grid asset-grid-single" id="selectedFloorplanGrid" hidden></div>
+              </div>
+
+              <div class="asset-preview-block">
+                <div class="asset-preview-title-row">
+                  <h4>Selected Interior Photos Preview</h4>
+                  <span class="count-badge" id="selectedInteriorCountBadge">0</span>
+                </div>
+                <p class="asset-preview-empty" id="selectedInteriorEmpty">No interior photos selected. Interior photos are optional.</p>
+                <div class="asset-grid" id="selectedInteriorGrid" hidden></div>
+              </div>
+            </section>
+
+            <!-- <div class="upload-debug-panel" id="uploadDebugPanel" hidden>
+              <h3>Upload payload</h3>
+              <dl>
+                <div>
+                  <dt>Floorplan</dt>
+                  <dd id="debugFloorplanName">-</dd>
+                </div>
+                <div>
+                  <dt>Interior count</dt>
+                  <dd id="debugInteriorCount">0</dd>
+                </div>
+                <div>
+                  <dt>Interior files</dt>
+                  <dd id="debugInteriorNames">-</dd>
+                </div>
+                <div>
+                  <dt>Backend count</dt>
+                  <dd id="debugBackendInteriorCount">-</dd>
+                </div>
+              </dl>
+              <p class="upload-warning" id="uploadDebugWarning" hidden></p>
+            </div> -->
+
+            <!-- <section class="asset-preview-section" id="backendAssetsSection" hidden>
+              <div class="asset-preview-header">
+                <h3>Uploaded Assets Confirmed by Backend</h3>
+              </div>
+
+              <div class="asset-preview-block">
+                <div class="asset-preview-title-row">
+                  <h4>Floorplan</h4>
+                </div>
+                <p class="asset-preview-empty" id="backendFloorplanEmpty">Upload a run to see backend-confirmed assets.</p>
+                <div class="asset-grid asset-grid-single" id="backendFloorplanGrid" hidden></div>
+              </div>
+
+              <div class="asset-preview-block">
+                <div class="asset-preview-title-row">
+                  <h4>Interior Photos</h4>
+                  <span class="count-badge" id="backendInteriorCountBadge">0</span>
+                </div>
+                <p class="asset-preview-empty" id="backendInteriorEmpty">No backend-confirmed interior photos yet.</p>
+                <div class="asset-grid" id="backendInteriorGrid" hidden></div>
+              </div>
+            </section> -->
+
+            <div class="pipeline-panel" id="pipelinePanel" hidden>
+              <div class="pipeline-header">
+                <span>Current step</span>
+                <strong id="currentStepLabel">Waiting</strong>
+              </div>
+              <ol class="progress-list" id="progressList" aria-label="Generation progress"></ol>
             </div>
-            <input type="hidden" name="style" value="japanese_watercolor" />
-            <input type="hidden" name="budget_level" value="medium" />
-            <input type="hidden" name="lifestyle" value="work_from_home,likes_plants,needs_storage" />
-            <button class="primary-button full" type="submit">イラスト間取りを生成する</button>
-            <p class="form-status" id="formStatus">API: POST /api/generate</p>
+
+            <div class="error-box" id="errorBox" hidden></div>
+
             <div class="result-panel" id="resultPanel" hidden>
-              <p class="eyebrow">Before / After</p>
+              <p class="eyebrow">Generated Draft</p>
               <div class="result-comparison">
                 <div class="result-card">
                   <div class="result-card-header">
-                    <h3>入力された間取り図</h3>
+                    <h3>Uploaded Floorplan</h3>
                   </div>
                   <img id="inputPreviewImage" class="result-image" alt="入力された間取り図" hidden />
                 </div>
                 <div class="result-card">
                   <div class="result-card-header">
-                    <h3>生成されたイラスト間取り図</h3>
+                    <h3>Generated Draft</h3>
                     <button id="downloadOutputBtn" class="download-button" type="button" hidden>
-                      ダウンロード
+                      Download
                     </button>
                   </div>
                   <img id="outputImage" class="result-image" alt="生成されたイラスト間取り図" hidden />
+                  <p class="result-meta" id="runIdText" hidden></p>
+                  <a class="result-url" id="outputUrlLink" href="#" target="_blank" rel="noreferrer" hidden></a>
                 </div>
               </div>
               <div class="quality-summary" id="qualitySummaryPanel" hidden>
@@ -209,10 +279,6 @@
                   <div>
                     <dt>Detected label boxes</dt>
                     <dd id="detectedLabelBoxCount">-</dd>
-                  </div>
-                  <div>
-                    <dt>OCR text boxes</dt>
-                    <dd id="ocrTextBoxCount">-</dd>
                   </div>
                   <div>
                     <dt>Auto label suggestions</dt>
@@ -235,6 +301,14 @@
                     <dd id="layoutGuardCompareRegion">-</dd>
                   </div>
                   <div>
+                    <dt>Room zone status</dt>
+                    <dd id="roomZoneStatus">-</dd>
+                  </div>
+                  <div>
+                    <dt>Room zone count</dt>
+                    <dd id="roomZoneCount">-</dd>
+                  </div>
+                  <div>
                     <dt>Watercolor quality</dt>
                     <dd id="qualityWatercolor">Manual review required</dd>
                   </div>
@@ -255,6 +329,24 @@
                     <img id="layoutDiffImage" alt="layout guard diff" hidden />
                   </div>
                 </div>
+                <div class="room-zone-editor">
+                  <h4>Room Zones</h4>
+                  <div class="layout-lock-preview-grid">
+                    <a id="interiorAreaMaskLink" target="_blank" rel="noreferrer" hidden>interior_area_mask</a>
+                    <a id="interiorAreaDebugLink" target="_blank" rel="noreferrer" hidden>interior_area_debug</a>
+                    <a id="roomZonesDebugLink" target="_blank" rel="noreferrer" hidden>room_zones_debug</a>
+                  </div>
+                  <textarea id="roomZonesJson" spellcheck="false"></textarea>
+                  <div class="manual-label-actions">
+                    <button id="saveRoomZonesBtn" class="secondary-button compact" type="button">
+                      Save Room Zones
+                    </button>
+                    <button id="detectRoomZonesBtn" class="secondary-button compact" type="button">
+                      Detect Room Zones
+                    </button>
+                  </div>
+                  <p id="roomZonesStatusText" class="manual-label-status"></p>
+                </div>
                 <div class="manual-label-editor">
                   <label for="manualLabelsJson">Manual English labels JSON</label>
                   <div class="label-preset-row" aria-label="Label presets">
@@ -272,9 +364,6 @@
                     <input id="manualLabelTextInput" type="text" value="Living Room" aria-label="Manual label text" />
                     <button id="addLabelBoxBtn" class="secondary-button compact" type="button">
                       Add Label Box
-                    </button>
-                    <button id="autoDetectLabelsBtn" class="secondary-button compact" type="button">
-                      Auto Detect Labels
                     </button>
                   </div>
                   <div class="label-image-editor" id="labelImageEditor" hidden>

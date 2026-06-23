@@ -1,6 +1,10 @@
 from __future__ import annotations
 
+import base64
 import json
+import logging
+import time
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Iterable
 
@@ -9,15 +13,26 @@ from fastapi import HTTPException
 from app.config import get_settings
 from app.schemas import (
     BalconyInfo,
+    BedSemanticRecord,
+    DerivedInteriorStyleProfile,
     DoorInfo,
     FloorplanAnalysis,
     FloorplanDesignAnalysis,
     FurnitureItem,
     FurniturePlan,
+    InteriorAnalysisSummary,
+    InteriorObjectSemanticRecord,
+    InteriorPhotoSemanticRecord,
+    InteriorStyleAnalysisArtifact,
+    InteriorStyleReferenceAnalysisGroups,
     RoomFurniturePlan,
     RoomInfo,
+    SofaSemanticRecord,
+    StyleReferenceSemanticRecord,
     WindowInfo,
 )
+
+logger = logging.getLogger(__name__)
 
 
 def _coerce_float(value):
@@ -37,6 +52,13 @@ def _coerce_bbox(value) -> list[float] | None:
             value = json.loads(value)
         except Exception:
             return None
+    if isinstance(value, dict):
+        value = [
+            value.get("x_min", value.get("left")),
+            value.get("y_min", value.get("top")),
+            value.get("x_max", value.get("right")),
+            value.get("y_max", value.get("bottom")),
+        ]
     if not isinstance(value, (list, tuple)):
         return None
     coords: list[float] = []
@@ -47,7 +69,38 @@ def _coerce_bbox(value) -> list[float] | None:
         coords.append(coerced)
     if len(coords) != 4:
         return None
-    return coords
+    return {
+        "x_min": coords[0],
+        "y_min": coords[1],
+        "x_max": coords[2],
+        "y_max": coords[3],
+    }
+
+
+def _coerce_polygon(value) -> list[list[float]] | None:
+    if value is None:
+        return None
+    if isinstance(value, str):
+        try:
+            value = json.loads(value)
+        except Exception:
+            return None
+    if not isinstance(value, (list, tuple)):
+        return None
+    polygon: list[list[float]] = []
+    for point in value:
+        if isinstance(point, dict):
+            x_value = point.get("x")
+            y_value = point.get("y")
+            point = [x_value, y_value]
+        if not isinstance(point, (list, tuple)) or len(point) < 2:
+            return None
+        x_coord = _coerce_float(point[0])
+        y_coord = _coerce_float(point[1])
+        if x_coord is None or y_coord is None:
+            return None
+        polygon.append([x_coord, y_coord])
+    return polygon or None
 
 
 class VisionAnalyzer:
@@ -78,6 +131,75 @@ class VisionAnalyzer:
         "top_right",
         "bottom_left",
         "bottom_right",
+        "unknown",
+    }
+
+    NORMALIZED_INTERIOR_OBJECT_TYPES = {
+        "bed",
+        "sofa",
+        "coffee_table",
+        "dining_table",
+        "chair",
+        "tv",
+        "tv_stand",
+        "refrigerator",
+        "wardrobe",
+        "desk",
+        "plant",
+        "potted_plant",
+        "curtain",
+        "rug",
+        "storage",
+        "shelf",
+        "lamp",
+        "floor_lamp",
+        "wall_art",
+        "two_single_beds",
+        "pillow",
+        "blanket",
+        "kitchen_counter",
+        "sink",
+        "stove",
+        "cabinet",
+        "bathtub",
+        "shower",
+        "towel",
+        "toilet",
+        "washbasin",
+        "unknown",
+    }
+
+    NORMALIZED_COLORS = {
+        "white",
+        "beige",
+        "gray",
+        "light_brown",
+        "dark_brown",
+        "brown",
+        "green",
+        "blue",
+        "pink",
+        "yellow",
+        "black",
+        "wood",
+        "unknown",
+    }
+
+    NORMALIZED_MATERIALS = {
+        "wood",
+        "fabric",
+        "leather",
+        "metal",
+        "tile",
+        "stone",
+        "glass",
+        "unknown",
+    }
+
+    FLOOR_COLOR_CATEGORIES = {
+        "white",
+        "light_brown",
+        "dark_brown",
         "unknown",
     }
 
@@ -142,18 +264,116 @@ class VisionAnalyzer:
             ],
         )
 
+    def analyze_interior_style_semantic_with_raw(
+        self,
+        interior_images: list[tuple[Path, str, dict]],
+        style_reference_images: dict[str, list[tuple[Path, str, dict]]],
+    ) -> tuple[InteriorStyleAnalysisArtifact, dict]:
+        settings = get_settings()
+        provider = self._vision_provider()
+        if provider == "openai":
+            return self._analyze_interior_style_openai_with_raw(interior_images, style_reference_images)
+        if provider == "gemini":
+            return self._analyze_interior_style_gemini_with_raw(interior_images, style_reference_images)
+        if provider != "stub":
+            raise HTTPException(status_code=500, detail=f"Unsupported VISION_PROVIDER: {provider}")
+
+        return self._analyze_interior_style_stub_with_raw(interior_images, style_reference_images)
+
+    def analyze_floorplan_semantic_with_raw(self, image_path: Path) -> tuple[FloorplanAnalysis, dict]:
+        settings = get_settings()
+        provider = self._vision_provider()
+        if provider == "openai":
+            return self._analyze_floorplan_openai_semantic_with_raw(image_path)
+        if provider == "gemini":
+            return self._analyze_floorplan_gemini_semantic_with_raw(image_path)
+        if provider != "stub":
+            raise HTTPException(status_code=500, detail=f"Unsupported VISION_PROVIDER: {provider}")
+
+        analysis = self.analyze_floorplan_stub(image_path)
+        return analysis, {
+            "provider": "stub",
+            "mode": "semantic_only",
+            "analysis": analysis.model_dump(mode="json"),
+        }
+
     def analyze_floorplan_design_with_raw(
         self, image_path: Path
     ) -> tuple[FloorplanAnalysis, FurniturePlan | None, dict]:
         settings = get_settings()
-        if settings.use_gemini_analysis:
+        provider = self._vision_provider()
+        if provider == "openai":
+            analysis, raw = self._analyze_floorplan_openai_semantic_with_raw(image_path)
+            return analysis, None, raw
+        if provider == "gemini":
             return self.analyze_floorplan_gemini(image_path)
+        if provider != "stub":
+            raise HTTPException(status_code=500, detail=f"Unsupported VISION_PROVIDER: {provider}")
 
         analysis = self.analyze_floorplan_stub(image_path)
         return analysis, None, {
             "provider": "stub",
             "analysis": analysis.model_dump(mode="json"),
         }
+
+    def _analyze_interior_style_stub_with_raw(
+        self,
+        interior_images: list[tuple[Path, str, dict]],
+        style_reference_images: dict[str, list[tuple[Path, str, dict]]],
+    ) -> tuple[InteriorStyleAnalysisArtifact, dict]:
+        interior_records = [
+            self._build_stub_interior_record(path, source_metadata)
+            for path, _, source_metadata in interior_images
+        ]
+        style_groups = InteriorStyleReferenceAnalysisGroups(
+            ideal=[
+                self._build_stub_style_reference_record(path, "ideal", source_metadata)
+                for path, _, source_metadata in style_reference_images.get("ideal", [])
+            ],
+            acceptable=[
+                self._build_stub_style_reference_record(path, "acceptable", source_metadata)
+                for path, _, source_metadata in style_reference_images.get("acceptable", [])
+            ],
+            ng=[
+                self._build_stub_style_reference_record(path, "ng", source_metadata)
+                for path, _, source_metadata in style_reference_images.get("ng", [])
+            ],
+        )
+        derived_profile = self._derive_interior_style_profile(interior_records, style_groups)
+        summary = InteriorAnalysisSummary(
+            provider="stub",
+            model=None,
+            interior_photo_count=len(interior_records),
+            style_reference_count=sum(
+                len(getattr(style_groups, group_name))
+                for group_name in ("ideal", "acceptable", "ng")
+            ),
+            preferred_floor_color=derived_profile.preferred_floor_color,
+            inferred_bed_type=derived_profile.inferred_bed_type,
+            accent_colors=derived_profile.accent_colors,
+            style_positive_cues=derived_profile.style_positive_cues,
+            style_avoid_cues=derived_profile.style_avoid_cues,
+        )
+        artifact = InteriorStyleAnalysisArtifact(
+            run_id="pending",
+            generated_at=datetime.now(timezone.utc),
+            provider="stub",
+            model=None,
+            interior_photos=interior_records,
+            style_references=style_groups,
+            derived_profile=derived_profile,
+            summary=summary,
+            warnings=[],
+            errors=[],
+        )
+        raw_payload = {
+            "provider": "stub",
+            "mode": "semantic_only",
+            "interior_photos": [record.model_dump(mode="json") for record in interior_records],
+            "style_references": style_groups.model_dump(mode="json"),
+            "derived_profile": derived_profile.model_dump(mode="json"),
+        }
+        return artifact, raw_payload
 
     def analyze_floorplan_with_raw(self, image_path: Path) -> tuple[FloorplanAnalysis, dict]:
         analysis, furniture_plan, raw_payload = self.analyze_floorplan_design_with_raw(image_path)
@@ -175,6 +395,156 @@ class VisionAnalyzer:
     ) -> tuple[FloorplanAnalysis, FurniturePlan | None, dict]:
         analysis, furniture_plan, raw_payload = self._analyze_floorplan_gemini_with_raw(image_path)
         return analysis, furniture_plan, raw_payload
+
+    def _vision_provider(self) -> str:
+        settings = get_settings()
+        provider = str(getattr(settings, "vision_provider", "") or "").strip().lower()
+        if not provider:
+            provider = "openai"
+        if provider == "gemini" or (provider == "stub" and settings.use_gemini_analysis):
+            raise HTTPException(
+                status_code=400,
+                detail="VISION_PROVIDER=gemini is deprecated in this project. Use VISION_PROVIDER=openai.",
+            )
+        return provider
+
+    def _require_openai_analysis_client(self):
+        settings = get_settings()
+        if not settings.openai_api_key:
+            raise HTTPException(
+                status_code=500,
+                detail="VISION_PROVIDER=openai requires OPENAI_API_KEY for semantic analysis.",
+            )
+        try:
+            from openai import OpenAI
+        except Exception as exc:  # pragma: no cover - depends on installed package
+            raise HTTPException(status_code=500, detail=f"openai SDK is not available: {exc}") from exc
+        return OpenAI(api_key=settings.openai_api_key, timeout=settings.openai_analysis_timeout_seconds)
+
+    def _analyze_floorplan_openai_semantic_with_raw(self, image_path: Path) -> tuple[FloorplanAnalysis, dict]:
+        settings = get_settings()
+        if not image_path.exists():
+            raise HTTPException(status_code=404, detail="floorplan image not found")
+        client = self._require_openai_analysis_client()
+        started = time.monotonic()
+        prompt = self._openai_floorplan_semantic_prompt()
+        response_text, parse_mode = self._generate_openai_json_text(
+            client=client,
+            model=settings.openai_analysis_model,
+            prompt=prompt,
+            image_paths=[image_path],
+            failure_detail="OpenAI floorplan semantic analysis failed",
+        )
+        try:
+            parsed = self._load_json_payload(response_text, "OpenAI floorplan semantic analysis")
+            normalized_payload = self._coerce_openai_floorplan_payload(parsed)
+            analysis = FloorplanAnalysis.model_validate(self._coerce_floorplan_payload(normalized_payload))
+        except HTTPException:
+            raise
+        except Exception as exc:
+            raise HTTPException(status_code=502, detail=f"OpenAI returned invalid floorplan JSON: {exc}") from exc
+        normalized = self.normalize_floorplan_analysis(analysis)
+        raw_payload = {
+            "provider": "openai",
+            "model": settings.openai_analysis_model,
+            "mode": "semantic_only",
+            "analysis_type": "floorplan_semantic",
+            "geometry_precision": "approximate_semantic_only",
+            "parse_mode": parse_mode,
+            "response_text": response_text,
+            "parsed_response": parsed,
+            "analysis": normalized.model_dump(mode="json"),
+            "duration_seconds": round(time.monotonic() - started, 3),
+            "warnings": parsed.get("warnings", []) if isinstance(parsed, dict) else [],
+            "errors": parsed.get("errors", []) if isinstance(parsed, dict) else [],
+        }
+        return normalized, raw_payload
+
+    def _analyze_interior_style_openai_with_raw(
+        self,
+        interior_images: list[tuple[Path, str, dict]],
+        style_reference_images: dict[str, list[tuple[Path, str, dict]]],
+    ) -> tuple[InteriorStyleAnalysisArtifact, dict]:
+        settings = get_settings()
+        client = self._require_openai_analysis_client()
+        started = time.monotonic()
+        interior_records: list[InteriorPhotoSemanticRecord] = []
+        interior_raw_records: list[dict] = []
+        for image_path, _, source_metadata in interior_images:
+            if not image_path.exists():
+                raise HTTPException(status_code=404, detail=f"interior image not found: {image_path.name}")
+            response_text, parse_mode = self._generate_openai_json_text(
+                client=client,
+                model=settings.openai_analysis_model,
+                prompt=self._openai_interior_semantic_prompt(source_metadata),
+                image_paths=[image_path],
+                failure_detail="OpenAI interior semantic analysis failed",
+            )
+            payload = self._load_json_payload(response_text, "OpenAI interior semantic analysis")
+            photo_payload = self._coerce_openai_interior_photo_payload(payload, source_metadata)
+            record = self._normalize_interior_photo_record(photo_payload, source_metadata)
+            interior_records.append(record)
+            interior_raw_records.append(
+                {
+                    "source_image": source_metadata,
+                    "parse_mode": parse_mode,
+                    "response_text": response_text,
+                    "parsed_response": payload,
+                    "analysis": record.model_dump(mode="json"),
+                }
+            )
+
+        style_groups = InteriorStyleReferenceAnalysisGroups(
+            ideal=[
+                self._build_stub_style_reference_record(path, "ideal", source_metadata)
+                for path, _, source_metadata in style_reference_images.get("ideal", [])
+            ],
+            acceptable=[
+                self._build_stub_style_reference_record(path, "acceptable", source_metadata)
+                for path, _, source_metadata in style_reference_images.get("acceptable", [])
+            ],
+            ng=[
+                self._build_stub_style_reference_record(path, "ng", source_metadata)
+                for path, _, source_metadata in style_reference_images.get("ng", [])
+            ],
+        )
+        derived_profile = self._derive_interior_style_profile(interior_records, style_groups)
+        summary = InteriorAnalysisSummary(
+            provider="openai",
+            model=settings.openai_analysis_model,
+            interior_photo_count=len(interior_records),
+            style_reference_count=sum(len(getattr(style_groups, group_name)) for group_name in ("ideal", "acceptable", "ng")),
+            preferred_floor_color=derived_profile.preferred_floor_color,
+            inferred_bed_type=derived_profile.inferred_bed_type,
+            accent_colors=derived_profile.accent_colors,
+            style_positive_cues=derived_profile.style_positive_cues,
+            style_avoid_cues=derived_profile.style_avoid_cues,
+        )
+        artifact = InteriorStyleAnalysisArtifact(
+            run_id="pending",
+            generated_at=datetime.now(timezone.utc),
+            provider="openai",
+            model=settings.openai_analysis_model,
+            interior_photos=interior_records,
+            style_references=style_groups,
+            derived_profile=derived_profile,
+            summary=summary,
+            warnings=[],
+            errors=[],
+        )
+        raw_payload = {
+            "provider": "openai",
+            "model": settings.openai_analysis_model,
+            "mode": "semantic_only",
+            "analysis_type": "interior_semantic",
+            "interior_photos": interior_raw_records,
+            "style_references": style_groups.model_dump(mode="json"),
+            "derived_profile": derived_profile.model_dump(mode="json"),
+            "duration_seconds": round(time.monotonic() - started, 3),
+            "warnings": [],
+            "errors": [],
+        }
+        return artifact, raw_payload
 
     def _analyze_floorplan_gemini_with_raw(
         self, image_path: Path
@@ -204,80 +574,1001 @@ class VisionAnalyzer:
         prompt = self._floorplan_design_prompt()
         schema = FloorplanDesignAnalysis.model_json_schema()
 
-        try:
-            response = client.models.generate_content(
-                model=settings.gemini_model,
-                contents=[
-                    types.Content(
-                        role="user",
-                        parts=[
-                            types.Part.from_text(text=prompt),
-                            types.Part.from_bytes(data=image_bytes, mime_type=mime_type),
-                        ],
-                    )
-                ],
-                config=types.GenerateContentConfig(
-                    temperature=0,
-                    response_mime_type="application/json",
-                    response_schema=schema,
-                ),
-            )
-            response_text = self._extract_gemini_text(response)
-        except Exception as structured_exc:
-            try:
-                response = client.models.generate_content(
-                    model=settings.gemini_model,
-                    contents=[
-                        types.Content(
-                            role="user",
-                            parts=[
-                                types.Part.from_text(text=prompt),
-                                types.Part.from_bytes(data=image_bytes, mime_type=mime_type),
-                            ],
-                        )
-                    ],
-                    config=types.GenerateContentConfig(
-                        temperature=0,
-                        response_mime_type="application/json",
-                    ),
-                )
-                response_text = self._extract_gemini_text(response)
-            except Exception as exc:
-                raise HTTPException(status_code=502, detail=f"Gemini floorplan analysis failed: {exc}") from exc
-
-            if not response_text:
-                raise HTTPException(
-                    status_code=502,
-                    detail="Gemini returned an empty floorplan analysis response.",
-                )
-
-            analysis, furniture_plan = self._parse_floorplan_design_json(response_text, provider="Gemini")
-            raw_payload = {
-                "provider": "gemini",
-                "model": settings.gemini_model,
-                "response_text": response_text,
-                "parse_mode": "json_only",
-                "analysis": analysis.model_dump(mode="json"),
-                "furniture_plan": furniture_plan.model_dump(mode="json") if furniture_plan else None,
-            }
-            return analysis, furniture_plan, raw_payload
-
-        if not response_text:
-            raise HTTPException(
-                status_code=502,
-                detail="Gemini returned an empty floorplan analysis response.",
-            )
+        response_text, parse_mode = self._generate_gemini_json_text(
+            client=client,
+            model=settings.gemini_model,
+            prompt=prompt,
+            image_bytes=image_bytes,
+            mime_type=mime_type,
+            schema=schema,
+            failure_detail="Gemini floorplan analysis failed",
+        )
 
         analysis, furniture_plan = self._parse_floorplan_design_json(response_text, provider="Gemini")
         raw_payload = {
             "provider": "gemini",
             "model": settings.gemini_model,
             "response_text": response_text,
-            "parse_mode": "structured_json",
+            "parse_mode": parse_mode,
             "analysis": analysis.model_dump(mode="json"),
             "furniture_plan": furniture_plan.model_dump(mode="json") if furniture_plan else None,
         }
         return analysis, furniture_plan, raw_payload
+
+    def _analyze_floorplan_gemini_semantic_with_raw(
+        self,
+        image_path: Path,
+    ) -> tuple[FloorplanAnalysis, dict]:
+        settings = get_settings()
+        if not settings.gemini_api_key:
+            raise HTTPException(
+                status_code=500,
+                detail="Gemini floorplan analysis is enabled but GEMINI_API_KEY is missing.",
+            )
+
+        if not image_path.exists():
+            raise HTTPException(status_code=404, detail="floorplan image not found")
+
+        try:
+            import google.genai as genai
+            from google.genai import types
+        except Exception as exc:
+            raise HTTPException(
+                status_code=500,
+                detail=f"google-genai is not available: {exc}",
+            ) from exc
+
+        client = genai.Client(api_key=settings.gemini_api_key)
+        mime_type = self._mime_type_for_path(image_path)
+        image_bytes = image_path.read_bytes()
+        prompt = self._floorplan_semantic_prompt()
+        schema = FloorplanAnalysis.model_json_schema()
+
+        response_text, parse_mode = self._generate_gemini_json_text(
+            client=client,
+            model=settings.gemini_model,
+            prompt=prompt,
+            image_bytes=image_bytes,
+            mime_type=mime_type,
+            schema=schema,
+            failure_detail="Gemini floorplan analysis failed",
+        )
+
+        try:
+            analysis = FloorplanAnalysis.model_validate(self._coerce_floorplan_payload(json.loads(self._strip_json_fences(response_text))))
+        except Exception as exc:
+            raise HTTPException(
+                status_code=502,
+                detail=f"Gemini returned invalid JSON for semantic floorplan analysis: {exc}",
+            ) from exc
+
+        normalized = self.normalize_floorplan_analysis(analysis)
+        raw_payload = {
+            "provider": "gemini",
+            "model": settings.gemini_model,
+            "mode": "semantic_only",
+            "parse_mode": parse_mode,
+            "response_text": response_text,
+            "analysis": normalized.model_dump(mode="json"),
+        }
+        return normalized, raw_payload
+
+    def _analyze_interior_style_gemini_with_raw(
+        self,
+        interior_images: list[tuple[Path, str, dict]],
+        style_reference_images: dict[str, list[tuple[Path, str, dict]]],
+    ) -> tuple[InteriorStyleAnalysisArtifact, dict]:
+        settings = get_settings()
+        if not settings.gemini_api_key:
+            raise HTTPException(
+                status_code=500,
+                detail="Gemini interior/style analysis is enabled but GEMINI_API_KEY is missing.",
+            )
+
+        try:
+            import google.genai as genai
+            from google.genai import types
+        except Exception as exc:
+            raise HTTPException(
+                status_code=500,
+                detail=f"google-genai is not available: {exc}",
+            ) from exc
+
+        client = genai.Client(api_key=settings.gemini_api_key)
+        interior_records: list[InteriorPhotoSemanticRecord] = []
+        interior_raw_records: list[dict] = []
+        for image_path, _, source_metadata in interior_images:
+            if not image_path.exists():
+                raise HTTPException(status_code=404, detail=f"interior image not found: {image_path.name}")
+            mime_type = self._mime_type_for_path(image_path)
+            image_bytes = image_path.read_bytes()
+            prompt = self._interior_semantic_prompt()
+            schema = {
+                "type": "object",
+                "properties": {
+                    "room_context": {"type": "string"},
+                    "floor_color_category": {"type": "string"},
+                    "detected_objects": {"type": "array"},
+                    "dominant_colors": {"type": "array"},
+                    "dominant_materials": {"type": "array"},
+                    "bed": {"type": "object"},
+                    "sofa": {"type": "object"},
+                    "notes": {"type": "array"},
+                },
+            }
+            response_text, parse_mode = self._generate_gemini_json_text(
+                client=client,
+                model=settings.gemini_model,
+                prompt=prompt,
+                image_bytes=image_bytes,
+                mime_type=mime_type,
+                schema=schema,
+                failure_detail="Gemini interior semantic analysis failed",
+            )
+            payload = self._load_json_payload(response_text, "Gemini interior semantic analysis")
+            record = self._normalize_interior_photo_record(payload, source_metadata)
+            interior_records.append(record)
+            interior_raw_records.append(
+                {
+                    "source_image": source_metadata,
+                    "response_text": response_text,
+                    "parse_mode": parse_mode,
+                    "analysis": record.model_dump(mode="json"),
+                }
+            )
+
+        style_groups = InteriorStyleReferenceAnalysisGroups()
+        style_raw_records: dict[str, list[dict]] = {"ideal": [], "acceptable": [], "ng": []}
+        for reference_type in ("ideal", "acceptable", "ng"):
+            for image_path, _, source_metadata in style_reference_images.get(reference_type, []):
+                if not image_path.exists():
+                    raise HTTPException(status_code=404, detail=f"style reference image not found: {image_path.name}")
+                mime_type = self._mime_type_for_path(image_path)
+                image_bytes = image_path.read_bytes()
+                prompt = self._style_reference_semantic_prompt(reference_type)
+                schema = {
+                    "type": "object",
+                    "properties": {
+                        "watercolor_strength": {"type": "string"},
+                        "linework_style": {"type": "string"},
+                        "palette_keywords": {"type": "array"},
+                        "positive_cues": {"type": "array"},
+                        "avoid_cues": {"type": "array"},
+                        "notes": {"type": "array"},
+                    },
+                }
+                response_text, parse_mode = self._generate_gemini_json_text(
+                    client=client,
+                    model=settings.gemini_model,
+                    prompt=prompt,
+                    image_bytes=image_bytes,
+                    mime_type=mime_type,
+                    schema=schema,
+                    failure_detail="Gemini style reference semantic analysis failed",
+                )
+                payload = self._load_json_payload(response_text, "Gemini style reference semantic analysis")
+                record = self._normalize_style_reference_record(payload, reference_type, source_metadata)
+                getattr(style_groups, reference_type).append(record)
+                style_raw_records[reference_type].append(
+                    {
+                        "source_image": source_metadata,
+                        "response_text": response_text,
+                        "parse_mode": parse_mode,
+                        "analysis": record.model_dump(mode="json"),
+                    }
+                )
+
+        derived_profile = self._derive_interior_style_profile(interior_records, style_groups)
+        summary = InteriorAnalysisSummary(
+            provider="gemini",
+            model=settings.gemini_model,
+            interior_photo_count=len(interior_records),
+            style_reference_count=sum(
+                len(getattr(style_groups, group_name))
+                for group_name in ("ideal", "acceptable", "ng")
+            ),
+            preferred_floor_color=derived_profile.preferred_floor_color,
+            inferred_bed_type=derived_profile.inferred_bed_type,
+            accent_colors=derived_profile.accent_colors,
+            style_positive_cues=derived_profile.style_positive_cues,
+            style_avoid_cues=derived_profile.style_avoid_cues,
+        )
+        artifact = InteriorStyleAnalysisArtifact(
+            run_id="pending",
+            generated_at=datetime.now(timezone.utc),
+            provider="gemini",
+            model=settings.gemini_model,
+            interior_photos=interior_records,
+            style_references=style_groups,
+            derived_profile=derived_profile,
+            summary=summary,
+            warnings=[],
+            errors=[],
+        )
+        raw_payload = {
+            "provider": "gemini",
+            "model": settings.gemini_model,
+            "mode": "semantic_only",
+            "interior_photos": interior_raw_records,
+            "style_references": style_raw_records,
+            "derived_profile": derived_profile.model_dump(mode="json"),
+        }
+        return artifact, raw_payload
+
+    def _generate_gemini_json_text(
+        self,
+        *,
+        client,
+        model: str,
+        prompt: str,
+        image_bytes: bytes,
+        mime_type: str,
+        schema: dict,
+        failure_detail: str,
+    ) -> tuple[str, str]:
+        from google.genai import types
+        settings = get_settings()
+
+        def run_with_retry(request_config):
+            attempts = max(1, int(settings.gemini_retry_attempts))
+            last_exc = None
+            for attempt in range(1, attempts + 1):
+                try:
+                    response = client.models.generate_content(
+                        model=model,
+                        contents=[
+                            types.Content(
+                                role="user",
+                                parts=[
+                                    types.Part.from_text(text=prompt),
+                                    types.Part.from_bytes(data=image_bytes, mime_type=mime_type),
+                                ],
+                            )
+                        ],
+                        config=request_config,
+                    )
+                    if attempt > 1:
+                        logger.info(
+                            "Gemini request succeeded after retry; provider=gemini model=%s attempts=%s",
+                            model,
+                            attempt,
+                        )
+                    return response
+                except Exception as exc:
+                    last_exc = exc
+                    if not self._is_retryable_gemini_error(exc) or attempt >= attempts:
+                        if self._is_retryable_gemini_error(exc) and attempt >= attempts:
+                            logger.warning(
+                                "Gemini request failed after all retries; provider=gemini model=%s attempts=%s error=%s",
+                                model,
+                                attempt,
+                                self._short_retryable_error(exc),
+                            )
+                        raise
+                    logger.warning(
+                        "Gemini request failed with retryable error; provider=gemini model=%s attempt=%s/%s delay_seconds=%s error=%s",
+                        model,
+                        attempt,
+                        attempts,
+                        settings.gemini_retry_delay_seconds,
+                        self._short_retryable_error(exc),
+                    )
+                    time.sleep(max(0.0, float(settings.gemini_retry_delay_seconds)))
+            if last_exc is not None:
+                raise last_exc
+
+        try:
+            response = run_with_retry(
+                types.GenerateContentConfig(
+                    temperature=0,
+                    response_mime_type="application/json",
+                    response_schema=schema,
+                )
+            )
+            response_text = self._extract_gemini_text(response)
+            parse_mode = "structured_json"
+        except Exception:
+            try:
+                response = run_with_retry(
+                    types.GenerateContentConfig(
+                        temperature=0,
+                        response_mime_type="application/json",
+                    )
+                )
+                response_text = self._extract_gemini_text(response)
+                parse_mode = "json_only"
+            except Exception as exc:
+                raise HTTPException(status_code=502, detail=f"{failure_detail}: {exc}") from exc
+
+        if not response_text:
+            raise HTTPException(status_code=502, detail=f"{failure_detail}: empty response")
+        return response_text, parse_mode
+
+    @staticmethod
+    def _is_retryable_gemini_error(exc: Exception) -> bool:
+        message = str(exc).lower()
+        retry_markers = (
+            "503",
+            "unavailable",
+            "resource_exhausted",
+            "temporarily unavailable",
+            "high demand",
+        )
+        return any(marker in message for marker in retry_markers)
+
+    @staticmethod
+    def _short_retryable_error(error: Exception) -> str:
+        text = str(error)
+        upper = text.upper()
+
+        if "RESOURCE_EXHAUSTED" in upper:
+            return "RESOURCE_EXHAUSTED"
+        if "UNAVAILABLE" in upper or "503" in upper:
+            return "503_UNAVAILABLE"
+        if "HIGH DEMAND" in upper:
+            return "HIGH_DEMAND"
+
+        return error.__class__.__name__
+
+    def _load_json_payload(self, response_text: str, provider_label: str) -> dict:
+        try:
+            return json.loads(self._strip_json_fences(response_text))
+        except Exception as exc:
+            raise HTTPException(
+                status_code=502,
+                detail=f"{provider_label} returned invalid JSON: {exc}",
+            ) from exc
+
+    def _generate_openai_json_text(
+        self,
+        *,
+        client,
+        model: str,
+        prompt: str,
+        image_paths: list[Path],
+        failure_detail: str,
+    ) -> tuple[str, str]:
+        settings = get_settings()
+        content: list[dict] = [{"type": "input_text", "text": prompt}]
+        for image_path in image_paths:
+            mime_type = self._mime_type_for_path(image_path)
+            image_bytes = image_path.read_bytes()
+            encoded = base64.b64encode(image_bytes).decode("ascii")
+            content.append({"type": "input_image", "image_url": f"data:{mime_type};base64,{encoded}"})
+        try:
+            response = client.responses.create(
+                model=model,
+                input=[{"role": "user", "content": content}],
+                max_output_tokens=settings.openai_analysis_max_output_tokens,
+            )
+        except Exception as exc:
+            short_error = self._short_retryable_error(exc)
+            raise HTTPException(status_code=502, detail=f"{failure_detail}: {short_error}") from exc
+
+        text = getattr(response, "output_text", None)
+        if isinstance(text, str) and text.strip():
+            return text.strip(), "responses_output_text"
+
+        try:
+            response_dict = response.model_dump()
+            chunks: list[str] = []
+            for output in response_dict.get("output", []) or []:
+                for item in output.get("content", []) or []:
+                    if item.get("type") in {"output_text", "text"} and item.get("text"):
+                        chunks.append(str(item["text"]))
+            if chunks:
+                return "".join(chunks).strip(), "responses_output_content"
+        except Exception:
+            pass
+
+        raise HTTPException(status_code=502, detail=f"{failure_detail}: empty response text")
+
+    def _openai_floorplan_semantic_prompt(self) -> str:
+        return (
+            "Analyze this Japanese apartment floorplan for semantic understanding only. Do not generate images.\n"
+            "Return strict JSON only, no markdown.\n"
+            "Do not treat geometry as CAD-accurate. Any bbox must be approximate_semantic_only.\n"
+            "Identify rooms, Japanese labels, English labels, rough positions, approximate bboxes if visible, fixtures, doors, windows, balcony, warnings, and confidence.\n"
+            "Allowed English labels: Living Room, Bed Room, Kitchen, Dining Kitchen, Bath Room, Toilet, Wash Room, Closet, Entrance, Balcony, Hallway, Storage, Western Room, Unknown.\n"
+            "Use room_type values compatible with these labels, lowercase snake_case when possible.\n"
+            "If multiple 洋室 rooms exist, use context; one may be Bed Room and another Western Room. If uncertain use western_room and add a warning.\n"
+            "Return JSON with keys: schema_version, provider, model, analysis_type, geometry_precision, canvas, rooms, fixtures, doors, windows, labels, dimensions, warnings, errors.\n"
+            "Room objects should include id, room_type, label_original, label_english, position, approx_bbox, confidence, geometry_confidence, geometry_notes.\n"
+        )
+
+    def _openai_interior_semantic_prompt(self, source_metadata: dict) -> str:
+        original = source_metadata.get("original_filename") or source_metadata.get("stored_filename") or "unknown"
+        return (
+            "Analyze this interior reference photo independently for semantic guidance only. Do not generate images.\n"
+            "Return strict JSON only, no markdown.\n"
+            f"Image original filename: {original}.\n"
+            "Return keys: stored_filename, original_filename, relative_path, room_hint, detected_objects, style_cues, color_cues, arrangement_hints, confidence, notes, floor_color_category, dominant_materials, bed, sofa, warnings, errors.\n"
+            "Allowed room_hint values: living_room, bed_room, western_room, dining, kitchen, bath_room, toilet, wash_room, closet, decoration, unknown.\n"
+            "Normalize object labels where possible: sofa, sofa_3_seater, tv, tv_stand, coffee_table, dining_table, chair, bed, two_single_beds, pillow, blanket, wardrobe, curtain, wall_art, potted_plant, floor_lamp, kitchen_counter, sink, stove, cabinet, bathtub, shower, towel, toilet, washbasin, refrigerator, rug.\n"
+            "If a bedroom clearly shows two separate beds, include two_single_beds, bed, pillow, blanket. If unclear include bed only and add a warning.\n"
+            "If sofa and TV are visible, include arrangement_hints: sofa_tv_opposite_with_coffee_table_between_when_possible.\n"
+            "Use floor_color_category one of white, light_brown, dark_brown, unknown.\n"
+        )
+
+    def _coerce_openai_floorplan_payload(self, payload: dict) -> dict:
+        if not isinstance(payload, dict):
+            raise TypeError("OpenAI floorplan response must be a JSON object")
+        warnings = self._coerce_text_list(payload.get("warnings"))
+        if payload.get("geometry_precision") != "approximate_semantic_only":
+            warnings.append("OpenAI geometry is approximate semantic-only and not CAD-accurate.")
+
+        rooms = []
+        for room in payload.get("rooms") or []:
+            if not isinstance(room, dict):
+                continue
+            geometry_notes = self._coerce_text_list(room.get("geometry_notes"))
+            if not geometry_notes:
+                geometry_notes = ["Approximate semantic bbox only; not CAD-accurate."]
+            rooms.append(
+                {
+                    "type": room.get("room_type") or room.get("type") or room.get("label_english") or "unknown",
+                    "room_name": room.get("label_original") or room.get("label_english") or room.get("name"),
+                    "position": room.get("position"),
+                    "size": room.get("size"),
+                    "approx_bbox": room.get("approx_bbox") or room.get("bbox") or room.get("bounding_box"),
+                    "bounding_box": room.get("approx_bbox") or room.get("bbox") or room.get("bounding_box"),
+                    "confidence": room.get("confidence"),
+                    "geometry_confidence": min(_coerce_float(room.get("geometry_confidence")) or 0.3, 0.3),
+                    "geometry_notes": geometry_notes,
+                    "connected_to": room.get("connected_to") or [],
+                }
+            )
+        return {
+            "apartment_type": payload.get("apartment_type"),
+            "layout_description": payload.get("layout_description") or "OpenAI semantic floorplan analysis; geometry is approximate only.",
+            "rooms": rooms,
+            "doors": payload.get("doors") or [],
+            "windows": payload.get("windows") or [],
+            "balcony": self._coerce_openai_balcony(payload),
+            "constraints": self._dedupe_preserve_order(
+                warnings + ["OpenAI bbox/geometry signals are approximate semantic-only and not CAD-accurate."]
+            ),
+        }
+
+    def _coerce_openai_balcony(self, payload: dict):
+        balcony = payload.get("balcony")
+        if isinstance(balcony, dict):
+            return balcony
+        rooms = payload.get("rooms") or []
+        has_balcony = any(isinstance(room, dict) and str(room.get("room_type") or "").lower() == "balcony" for room in rooms)
+        return {"exists": has_balcony, "position": None} if has_balcony else None
+
+    def _coerce_openai_interior_photo_payload(self, payload: dict, source_metadata: dict) -> dict:
+        if not isinstance(payload, dict):
+            raise TypeError("OpenAI interior response must be a JSON object")
+        if isinstance(payload.get("photos"), list) and payload["photos"]:
+            first = payload["photos"][0]
+            if isinstance(first, dict):
+                payload = first
+        detected_objects = payload.get("detected_objects") or payload.get("objects") or []
+        if isinstance(detected_objects, list):
+            detected_objects = [
+                {"object_type": item} if isinstance(item, str) else item
+                for item in detected_objects
+                if item is not None
+            ]
+        else:
+            detected_objects = []
+        room_hint = payload.get("room_hint") or payload.get("room_context") or "unknown"
+        return {
+            "source_image": source_metadata,
+            "stored_filename": payload.get("stored_filename") or source_metadata.get("stored_filename"),
+            "original_filename": payload.get("original_filename") or source_metadata.get("original_filename"),
+            "relative_path": payload.get("relative_path") or source_metadata.get("relative_path"),
+            "room_context": self._openai_room_hint_to_legacy_context(room_hint),
+            "floor_color_category": payload.get("floor_color_category") or payload.get("floor_tone") or "unknown",
+            "detected_objects": detected_objects,
+            "dominant_colors": payload.get("color_cues") or payload.get("dominant_colors") or [],
+            "dominant_materials": payload.get("dominant_materials") or [],
+            "bed": payload.get("bed"),
+            "sofa": payload.get("sofa"),
+            "notes": self._dedupe_preserve_order(
+                self._coerce_text_list(payload.get("notes"))
+                + self._coerce_text_list(payload.get("style_cues"))
+                + self._coerce_text_list(payload.get("arrangement_hints"))
+                + self._coerce_text_list(payload.get("warnings"))
+            ),
+        }
+
+    @staticmethod
+    def _openai_room_hint_to_legacy_context(value: str | None) -> str:
+        raw = (value or "unknown").strip().lower()
+        mapping = {
+            "bed_room": "bedroom",
+            "western_room": "bedroom",
+            "bath_room": "bathroom",
+            "wash_room": "washroom",
+            "dining": "living_room",
+            "decoration": "living_room",
+        }
+        return mapping.get(raw, raw)
+
+    def _build_stub_interior_record(self, image_path: Path, source_metadata: dict) -> InteriorPhotoSemanticRecord:
+        room_context = "bedroom" if "bed" in image_path.name.lower() else "living_room"
+        objects = [
+            InteriorObjectSemanticRecord(object_type="bed" if room_context == "bedroom" else "sofa", color="white", material="fabric", count=1),
+            InteriorObjectSemanticRecord(object_type="plant", color="green", material="unknown", count=1),
+        ]
+        bed = None
+        sofa = None
+        if room_context == "bedroom":
+            bed = BedSemanticRecord(
+                present=True,
+                pillow_count=2,
+                inferred_bed_type="semi_double_bed",
+                base_color="white",
+                cushion_colors=["beige", "green"],
+            )
+        else:
+            sofa = SofaSemanticRecord(
+                present=True,
+                base_color="white",
+                cushion_colors=["beige", "green"],
+            )
+        return InteriorPhotoSemanticRecord(
+            source_image=self._coerce_image_inspection_metadata(source_metadata),
+            room_context=room_context,
+            floor_color_category="light_brown",
+            detected_objects=objects,
+            dominant_colors=["white", "beige", "green"],
+            dominant_materials=["wood", "fabric"],
+            bed=bed,
+            sofa=sofa,
+            notes=["Deterministic stub interior analysis."],
+        )
+
+    def _build_stub_style_reference_record(
+        self,
+        image_path: Path,
+        reference_type: str,
+        source_metadata: dict,
+    ) -> StyleReferenceSemanticRecord:
+        positive = ["soft watercolor wash", "clean readable walls"]
+        avoid = ["heavy dark framing"] if reference_type == "ng" else []
+        if reference_type == "ideal":
+            positive.append("warm natural palette")
+        if reference_type == "acceptable":
+            positive.append("balanced furniture detail")
+        if reference_type == "ng":
+            avoid.extend(["muddy colors", "overly dense texture"])
+        return StyleReferenceSemanticRecord(
+            source_image=self._coerce_image_inspection_metadata(source_metadata),
+            reference_type=reference_type,
+            watercolor_strength="medium",
+            linework_style="clean",
+            palette_keywords=["beige", "light_brown", "white"],
+            positive_cues=positive if reference_type != "ng" else [],
+            avoid_cues=avoid,
+            notes=[f"Deterministic stub style analysis for {reference_type} reference."],
+        )
+
+    def _normalize_interior_photo_record(self, payload: dict, source_metadata: dict) -> InteriorPhotoSemanticRecord:
+        room_context = self._normalize_room_context(payload.get("room_context"))
+        floor_color = self._normalize_floor_color(payload.get("floor_color_category"))
+        detected_objects = [
+            self._normalize_interior_object(item)
+            for item in (payload.get("detected_objects") or payload.get("objects") or [])
+        ]
+        dominant_colors = self._dedupe_preserve_order(
+            [self._normalize_color(color) for color in self._coerce_text_list(payload.get("dominant_colors"))]
+        )
+        dominant_materials = self._dedupe_preserve_order(
+            [self._normalize_material(material) for material in self._coerce_text_list(payload.get("dominant_materials"))]
+        )
+        bed = self._normalize_bed_record(payload.get("bed"))
+        sofa = self._normalize_sofa_record(payload.get("sofa"))
+        notes = self._coerce_text_list(payload.get("notes"))
+        record = InteriorPhotoSemanticRecord(
+            source_image=self._coerce_image_inspection_metadata(source_metadata),
+            room_context=room_context,
+            floor_color_category=floor_color,
+            detected_objects=detected_objects,
+            dominant_colors=dominant_colors,
+            dominant_materials=dominant_materials,
+            bed=bed,
+            sofa=sofa,
+            notes=notes,
+        )
+        return self._enrich_interior_photo_record(record)
+
+    def _normalize_style_reference_record(
+        self,
+        payload: dict,
+        reference_type: str,
+        source_metadata: dict,
+    ) -> StyleReferenceSemanticRecord:
+        palette_keywords = self._dedupe_preserve_order(
+            [self._normalize_color(color) for color in self._coerce_text_list(payload.get("palette_keywords"))]
+        )
+        positive_cues = self._coerce_text_list(payload.get("positive_cues"))
+        avoid_cues = self._coerce_text_list(payload.get("avoid_cues"))
+        notes = self._coerce_text_list(payload.get("notes"))
+        return StyleReferenceSemanticRecord(
+            source_image=self._coerce_image_inspection_metadata(source_metadata),
+            reference_type=reference_type,
+            watercolor_strength=str(payload.get("watercolor_strength") or "medium"),
+            linework_style=str(payload.get("linework_style") or "clean"),
+            palette_keywords=palette_keywords,
+            positive_cues=positive_cues,
+            avoid_cues=avoid_cues,
+            notes=notes,
+        )
+
+    def _derive_interior_style_profile(
+        self,
+        interior_records: list[InteriorPhotoSemanticRecord],
+        style_groups: InteriorStyleReferenceAnalysisGroups,
+    ) -> DerivedInteriorStyleProfile:
+        floor_colors = [record.floor_color_category for record in interior_records if record.floor_color_category != "unknown"]
+        preferred_floor_color = floor_colors[0] if floor_colors else "unknown"
+
+        inferred_bed_type = None
+        accent_colors: list[str] = []
+        cushion_colors: list[str] = []
+        preferred_materials: list[str] = []
+        for record in interior_records:
+            accent_colors.extend(color for color in record.dominant_colors if color not in {"white", "unknown"})
+            preferred_materials.extend(material for material in record.dominant_materials if material != "unknown")
+            if record.bed and record.bed.inferred_bed_type and inferred_bed_type is None:
+                inferred_bed_type = record.bed.inferred_bed_type
+            if record.bed:
+                cushion_colors.extend(record.bed.cushion_colors)
+            if record.sofa:
+                cushion_colors.extend(record.sofa.cushion_colors)
+
+        positive_cues: list[str] = []
+        acceptable_cues: list[str] = []
+        avoid_cues: list[str] = []
+        for item in style_groups.ideal:
+            positive_cues.extend(item.positive_cues)
+        for item in style_groups.acceptable:
+            acceptable_cues.extend(item.positive_cues)
+        for item in style_groups.ng:
+            avoid_cues.extend(item.avoid_cues)
+
+        return DerivedInteriorStyleProfile(
+            preferred_floor_color=self._normalize_floor_color(preferred_floor_color),
+            bed_base_color="white",
+            sofa_base_color="white",
+            inferred_bed_type=inferred_bed_type,
+            accent_colors=self._dedupe_preserve_order([self._normalize_color(color) for color in accent_colors if color]),
+            cushion_colors=self._dedupe_preserve_order([self._normalize_color(color) for color in cushion_colors if color]),
+            preferred_materials=self._dedupe_preserve_order([self._normalize_material(material) for material in preferred_materials if material]),
+            style_positive_cues=self._dedupe_preserve_order([cue for cue in positive_cues if cue]),
+            style_acceptable_cues=self._dedupe_preserve_order([cue for cue in acceptable_cues if cue]),
+            style_avoid_cues=self._dedupe_preserve_order([cue for cue in avoid_cues if cue]),
+        )
+
+    def _normalize_interior_object(self, payload: dict) -> InteriorObjectSemanticRecord:
+        if not isinstance(payload, dict):
+            return InteriorObjectSemanticRecord(
+                object_type=self._normalize_interior_object_type(str(payload) if payload is not None else None),
+                color="unknown",
+                material="unknown",
+                count=1,
+            )
+        count = payload.get("count")
+        try:
+            count = int(count)
+        except (TypeError, ValueError):
+            count = 1
+        count = max(1, count)
+        return InteriorObjectSemanticRecord(
+            object_type=self._normalize_interior_object_type(
+                payload.get("object_type") or payload.get("type") or payload.get("label")
+            ),
+            color=self._normalize_color(payload.get("color")),
+            material=self._normalize_material(payload.get("material")),
+            count=count,
+            notes="; ".join(self._coerce_text_list(payload.get("notes"))) or None,
+            source=self._safe_string(payload.get("source")),
+        )
+
+    def _normalize_bed_record(self, payload: dict | None) -> BedSemanticRecord | None:
+        if payload is None:
+            return None
+        if not isinstance(payload, dict):
+            return BedSemanticRecord(present=bool(payload), base_color="white")
+        if not payload:
+            return BedSemanticRecord(present=False, base_color="white")
+        pillow_count = payload.get("pillow_count") or payload.get("pillows") or payload.get("cushion_count")
+        try:
+            pillow_count = int(pillow_count) if pillow_count is not None else None
+        except (TypeError, ValueError):
+            pillow_count = None
+        inferred = self._infer_bed_type_from_pillows(pillow_count)
+        cushion_colors = self._dedupe_preserve_order(
+            [
+                self._normalize_color(color)
+                for color in self._coerce_text_list(payload.get("cushion_colors") or payload.get("pillow_colors"))
+            ]
+        )
+        return BedSemanticRecord(
+            present=bool(payload.get("present", True)),
+            pillow_count=pillow_count,
+            inferred_bed_type=inferred,
+            base_color="white",
+            cushion_colors=cushion_colors,
+        )
+
+    def _normalize_sofa_record(self, payload: dict | None) -> SofaSemanticRecord | None:
+        if payload is None:
+            return None
+        if not isinstance(payload, dict):
+            return SofaSemanticRecord(present=bool(payload), base_color="white")
+        if not payload:
+            return SofaSemanticRecord(present=False, base_color="white")
+        cushion_colors = self._dedupe_preserve_order(
+            [self._normalize_color(color) for color in self._coerce_text_list(payload.get("cushion_colors"))]
+        )
+        return SofaSemanticRecord(
+            present=bool(payload.get("present", True)),
+            base_color="white",
+            cushion_colors=cushion_colors,
+        )
+
+    def _coerce_text_list(self, value) -> list[str]:
+        if value is None:
+            return []
+        if isinstance(value, str):
+            text = value.strip()
+            return [text] if text else []
+        if isinstance(value, list):
+            return [str(item).strip() for item in value if str(item).strip()]
+        return [str(value).strip()] if str(value).strip() else []
+
+    def _enrich_interior_photo_record(self, record: InteriorPhotoSemanticRecord) -> InteriorPhotoSemanticRecord:
+        notes_text = " ".join(record.notes).lower()
+        filename_text = " ".join(
+            filter(
+                None,
+                [
+                    (record.source_image.original_filename or "").lower(),
+                    (record.source_image.stored_filename or "").lower(),
+                ],
+            )
+        )
+
+        known_objects = [obj for obj in record.detected_objects if obj.object_type != "unknown"]
+        should_enrich = not record.detected_objects or len(known_objects) <= max(1, len(record.detected_objects) // 2)
+        if not should_enrich:
+            return record
+
+        detected_objects = list(record.detected_objects)
+        existing_types = {obj.object_type for obj in detected_objects}
+
+        def add_object(object_type: str, *, count: int = 1, color: str | None = None, material: str | None = None) -> None:
+            if object_type in existing_types:
+                return
+            detected_objects.append(
+                InteriorObjectSemanticRecord(
+                    object_type=object_type,
+                    color=color or "unknown",
+                    material=material or "unknown",
+                    count=max(1, int(count)),
+                    notes="Inferred from interior analysis notes or filename.",
+                    source="deterministic_postprocess",
+                )
+            )
+            existing_types.add(object_type)
+
+        combined_text = f"{notes_text} {filename_text}".strip()
+
+        if record.sofa and record.sofa.present:
+            add_object(
+                "sofa",
+                color=self._normalize_color(record.sofa.base_color),
+                material="fabric" if record.sofa.cushion_colors else "unknown",
+            )
+        if record.bed and record.bed.present:
+            bed_type = record.bed.inferred_bed_type or "bed"
+            add_object(bed_type if bed_type in {"single_bed", "semi_double_bed", "double_bed"} else "bed", color="white")
+
+        if any(token in combined_text for token in ("television", " tv ", "tv", "media console")):
+            add_object("tv")
+            add_object("tv_stand")
+        if "dining table" in combined_text:
+            add_object("dining_table")
+        if "coffee table" in combined_text:
+            add_object("coffee_table")
+        if "four chairs" in combined_text:
+            add_object("chair", count=4)
+        elif "chair" in combined_text:
+            add_object("chair")
+        if any(token in combined_text for token in ("potted plant", " plant", "plant ", "ficus")):
+            add_object("potted_plant", color="green")
+        if "curtain" in combined_text:
+            add_object("curtain", color="white")
+        if any(token in combined_text for token in ("wall art", "framed picture", "painting")):
+            add_object("wall_art")
+        if "desk" in combined_text:
+            add_object("desk")
+        if "shelf" in combined_text:
+            add_object("shelf")
+        if any(token in combined_text for token in ("floor lamp", "standing lamp")):
+            add_object("floor_lamp")
+
+        return record.model_copy(update={"detected_objects": detected_objects})
+
+    def _coerce_image_inspection_metadata(self, payload: dict):
+        from app.schemas.run import ImageInspectionMetadata
+
+        return ImageInspectionMetadata.model_validate(payload)
+
+    def _normalize_room_context(self, value: str | None) -> str:
+        room_type = self._normalize_room_type(value)
+        return room_type if room_type in {"living_room", "bedroom", "kitchen", "dining_kitchen", "bathroom", "toilet", "washroom", "entrance"} else "unknown"
+
+    def _normalize_floor_color(self, value: str | None) -> str:
+        if not value:
+            return "unknown"
+        raw = self._normalize_text(value)
+        if raw in self.FLOOR_COLOR_CATEGORIES:
+            return raw
+        if "white" in raw or "ivory" in raw:
+            return "white"
+        if "dark" in raw and "brown" in raw:
+            return "dark_brown"
+        if "light" in raw and "brown" in raw:
+            return "light_brown"
+        if "wood" in raw and "dark" in raw:
+            return "dark_brown"
+        if "wood" in raw or "brown" in raw:
+            return "light_brown"
+        return "unknown"
+
+    def _normalize_interior_object_type(self, value: str | None) -> str:
+        if not value:
+            return "unknown"
+        raw = self._normalize_text(value)
+        alias = {
+            "bed": "bed",
+            "single bed": "bed",
+            "two single beds": "two_single_beds",
+            "two_single_beds": "two_single_beds",
+            "twin beds": "two_single_beds",
+            "double bed": "bed",
+            "semi double bed": "bed",
+            "single_bed": "bed",
+            "semi_double_bed": "bed",
+            "double_bed": "bed",
+            "sofa": "sofa",
+            "couch": "sofa",
+            "coffee table": "coffee_table",
+            "table": "coffee_table",
+            "dining table": "dining_table",
+            "dining chairs": "chair",
+            "dining chair": "chair",
+            "chairs": "chair",
+            "chair": "chair",
+            "tv": "tv",
+            "television": "tv",
+            "tv stand": "tv_stand",
+            "media console": "tv_stand",
+            "refrigerator": "refrigerator",
+            "fridge": "refrigerator",
+            "wardrobe": "wardrobe",
+            "closet": "wardrobe",
+            "desk": "desk",
+            "plant": "plant",
+            "plants": "plant",
+            "potted plant": "potted_plant",
+            "potted plants": "potted_plant",
+            "curtain": "curtain",
+            "curtains": "curtain",
+            "rug": "rug",
+            "area rug": "rug",
+            "storage": "storage",
+            "shelf": "storage",
+            "wall art": "wall_art",
+            "painting": "wall_art",
+            "framed picture": "wall_art",
+            "decorative items": "wall_art",
+            "lamp": "lamp",
+            "floor lamp": "floor_lamp",
+            "pillow": "pillow",
+            "pillows": "pillow",
+            "blanket": "blanket",
+            "bedding": "blanket",
+            "kitchen counter": "kitchen_counter",
+            "counter": "kitchen_counter",
+            "sink": "sink",
+            "kitchen sink": "sink",
+            "stove": "stove",
+            "cooktop": "stove",
+            "cabinet": "cabinet",
+            "cabinets": "cabinet",
+            "bathtub": "bathtub",
+            "tub": "bathtub",
+            "shower": "shower",
+            "towel": "towel",
+            "toilet": "toilet",
+            "washbasin": "washbasin",
+            "wash basin": "washbasin",
+            "vanity": "washbasin",
+        }
+        return alias.get(raw, raw if raw in self.NORMALIZED_INTERIOR_OBJECT_TYPES else "unknown")
+
+    def _normalize_color(self, value: str | None) -> str:
+        if not value:
+            return "unknown"
+        raw = self._normalize_text(value)
+        alias = {
+            "off white": "white",
+            "cream": "beige",
+            "ivory": "white",
+            "light wood": "light_brown",
+            "dark wood": "dark_brown",
+            "wood": "wood",
+            "brown": "brown",
+            "beige": "beige",
+            "gray": "gray",
+            "grey": "gray",
+            "green": "green",
+            "blue": "blue",
+            "pink": "pink",
+            "yellow": "yellow",
+            "black": "black",
+            "white": "white",
+        }
+        if raw in alias:
+            return alias[raw]
+        if "white" in raw:
+            return "white"
+        if "beige" in raw or "cream" in raw:
+            return "beige"
+        if "light" in raw and "brown" in raw:
+            return "light_brown"
+        if "dark" in raw and "brown" in raw:
+            return "dark_brown"
+        if "brown" in raw:
+            return "brown"
+        if "green" in raw:
+            return "green"
+        if "blue" in raw:
+            return "blue"
+        if "pink" in raw:
+            return "pink"
+        if "yellow" in raw:
+            return "yellow"
+        if "black" in raw:
+            return "black"
+        if "wood" in raw:
+            return "wood"
+        return "unknown"
+
+    def _normalize_material(self, value: str | None) -> str:
+        if not value:
+            return "unknown"
+        raw = self._normalize_text(value)
+        alias = {
+            "wood": "wood",
+            "fabric": "fabric",
+            "textile": "fabric",
+            "leather": "leather",
+            "metal": "metal",
+            "tile": "tile",
+            "stone": "stone",
+            "glass": "glass",
+        }
+        return alias.get(raw, raw if raw in self.NORMALIZED_MATERIALS else "unknown")
+
+    @staticmethod
+    def _infer_bed_type_from_pillows(pillow_count: int | None) -> str | None:
+        if pillow_count is None:
+            return None
+        if pillow_count <= 1:
+            return "single_bed"
+        if pillow_count == 2:
+            return "semi_double_bed"
+        if pillow_count in {3, 4}:
+            return "double_bed"
+        return "double_bed"
 
     @staticmethod
     def _dedupe_preserve_order(values: list[str]) -> list[str]:
@@ -297,6 +1588,11 @@ class VisionAnalyzer:
                 position=self._normalize_position_for_room(room),
                 size=room.size,
                 bounding_box=room.bounding_box,
+                approx_bbox=room.approx_bbox,
+                polygon=room.polygon,
+                confidence=room.confidence,
+                geometry_confidence=room.geometry_confidence,
+                geometry_notes=list(room.geometry_notes or []),
                 connected_to=self._dedupe_preserve_order(
                     [self._normalize_room_type(label) for label in room.connected_to]
                 ),
@@ -309,6 +1605,12 @@ class VisionAnalyzer:
                 connects=self._dedupe_preserve_order(
                     [self._normalize_room_type(label) for label in door.connects]
                 ),
+                bounding_box=door.bounding_box,
+                approx_bbox=door.approx_bbox,
+                polygon=door.polygon,
+                confidence=door.confidence,
+                geometry_confidence=door.geometry_confidence,
+                geometry_notes=list(door.geometry_notes or []),
             )
             for door in analysis.doors
         ]
@@ -316,6 +1618,12 @@ class VisionAnalyzer:
             WindowInfo(
                 position=self._normalize_position(window.position),
                 room=self._normalize_room_type(window.room) if window.room else None,
+                bounding_box=window.bounding_box,
+                approx_bbox=window.approx_bbox,
+                polygon=window.polygon,
+                confidence=window.confidence,
+                geometry_confidence=window.geometry_confidence,
+                geometry_notes=list(window.geometry_notes or []),
             )
             for window in analysis.windows
         ]
@@ -325,6 +1633,12 @@ class VisionAnalyzer:
             normalized_balcony = BalconyInfo(
                 exists=analysis.balcony.exists,
                 position=self._normalize_position(analysis.balcony.position),
+                bounding_box=analysis.balcony.bounding_box,
+                approx_bbox=analysis.balcony.approx_bbox,
+                polygon=analysis.balcony.polygon,
+                confidence=analysis.balcony.confidence,
+                geometry_confidence=analysis.balcony.geometry_confidence,
+                geometry_notes=list(analysis.balcony.geometry_notes or []),
             )
 
         apartment_type = analysis.apartment_type
@@ -344,13 +1658,23 @@ class VisionAnalyzer:
     def _normalize_position_for_room(self, room: RoomInfo) -> str:
         if room.position:
             return self._normalize_position(room.position)
-        if room.bounding_box:
-            inferred = self._infer_position_from_bbox(room.bounding_box)
-            if inferred != "unknown":
-                return inferred
+        inferred = self._infer_position_from_bbox(room.bounding_box or room.approx_bbox)
+        if inferred != "unknown":
+            return inferred
         return "unknown"
 
-    def _infer_position_from_bbox(self, bbox: list[float] | None) -> str:
+    def _infer_position_from_bbox(self, bbox) -> str:
+        if bbox is None:
+            return "unknown"
+        if hasattr(bbox, "model_dump"):
+            bbox = bbox.model_dump(mode="json")
+        if isinstance(bbox, dict):
+            bbox = [
+                bbox.get("x_min"),
+                bbox.get("y_min"),
+                bbox.get("x_max"),
+                bbox.get("y_max"),
+            ]
         if not bbox or len(bbox) < 4:
             return "unknown"
         try:
@@ -358,10 +1682,14 @@ class VisionAnalyzer:
         except (TypeError, ValueError):
             return "unknown"
 
-        center_x = (x1 + x2) / 2
-        center_y = (y1 + y2) / 2
+        max_coord = max(abs(x1), abs(y1), abs(x2), abs(y2))
+        if max_coord > 1.5:
+            center_x = ((x1 + x2) / 2) / 1200.0
+            center_y = ((y1 + y2) / 2) / 1200.0
+        else:
+            center_x = (x1 + x2) / 2
+            center_y = (y1 + y2) / 2
 
-        # Works best for normalized [0, 1] coordinates.
         if center_x <= 0.33 and center_y <= 0.33:
             return "top_left"
         if center_x >= 0.67 and center_y <= 0.33:
@@ -405,6 +1733,8 @@ class VisionAnalyzer:
             "玄関": "entrance",
             "genkan": "entrance",
             "洋室": "bedroom",
+            "western room": "bedroom",
+            "western_room": "bedroom",
             "ldk": "living_room",
             "living dining kitchen": "living_room",
             "living dining kitchen area": "living_room",
@@ -445,6 +1775,8 @@ class VisionAnalyzer:
         if "玄関" in value or "genkan" in raw:
             return "entrance"
         if "洋室" in value:
+            return "bedroom"
+        if "western" in raw:
             return "bedroom"
         if "ldk" in raw:
             return "living_room"
@@ -536,6 +1868,13 @@ class VisionAnalyzer:
         )
         return " ".join(normalized.split())
 
+    @staticmethod
+    def _safe_string(value) -> str | None:
+        if value is None:
+            return None
+        text = str(value).strip()
+        return text or None
+
     def _floorplan_design_prompt(self) -> str:
         return (
             "Analyze the uploaded Japanese apartment floorplan image and return JSON only.\n"
@@ -554,6 +1893,59 @@ class VisionAnalyzer:
             "For small rooms, use compact furniture. For large rooms, use richer furniture.\n"
             "For each furniture item, include furniture_type and a short position_hint such as against bottom wall, near balcony door, center of room, next to closet, or beside kitchen counter.\n"
             "Do not estimate furniture relative_x, relative_y, or rotation values.\n"
+            "Return valid JSON only. No markdown."
+        )
+
+    def _floorplan_semantic_prompt(self) -> str:
+        return (
+            "Analyze the uploaded Japanese apartment floorplan image and return JSON only.\n"
+            "Return a single object matching this structure: apartment_type, layout_description, rooms, doors, windows, balcony, constraints.\n"
+            "Focus only on semantic floorplan analysis.\n"
+            "Do not generate a furniture plan.\n"
+            "Do not estimate furniture items.\n"
+            "Preserve spatial positions as accurately as possible.\n"
+            "Identify room types, approximate room positions, likely doors, likely windows, balcony presence, and layout constraints.\n"
+            "Use a normalized 1200x1200 canvas for approximate geometry.\n"
+            "Coordinate system: origin is top-left, x increases left-to-right, y increases top-to-bottom, and all coordinates must be integers from 0 to 1199.\n"
+            "For each visible room, include: id, type, label_original, label_english, position, approx_bbox, polygon, confidence, geometry_confidence, geometry_notes.\n"
+            "For doors, windows, and balcony, include approx_bbox, polygon, confidence, geometry_confidence, and geometry_notes when visible.\n"
+            "approx_bbox must use x_min, y_min, x_max, y_max. Estimate approximate_bbox only from the visible floorplan.\n"
+            "If uncertain, set approx_bbox to null and explain uncertainty in geometry_notes.\n"
+            "Do not invent precise geometry if uncertain.\n"
+            "Do not invent missing rooms or features.\n"
+            "If uncertain, use null or empty lists.\n"
+            "Use normalized room types where possible: living_room, bedroom, kitchen, dining_kitchen, bathroom, toilet, washroom, closet, walk_in_closet, entrance, balcony, hallway, storage, unknown.\n"
+            "Use normalized positions where possible: top, bottom, left, right, center, top_left, top_right, bottom_left, bottom_right, unknown.\n"
+            "Use approved English labels where possible: Living Room, Kitchen, Closet, Toilet, Entrance, Bed Room, Bath Room, Wash Room, Dining Kitchen, Balcony, Hallway, Storage, Unknown.\n"
+            "Return valid JSON only. No markdown."
+        )
+
+    def _interior_semantic_prompt(self) -> str:
+        return (
+            "Analyze the uploaded interior reference photo and return JSON only.\n"
+            "This is semantic analysis only. Do not generate images.\n"
+            "Return keys: room_context, floor_color_category, detected_objects, dominant_colors, dominant_materials, bed, sofa, notes.\n"
+            "floor_color_category must be one of: white, light_brown, dark_brown, unknown.\n"
+            "For bed and sofa, focus on visible semantics only.\n"
+            "Bed and sofa base colors should be normalized to white when present.\n"
+            "Estimate pillow or cushion colors when visible.\n"
+            "Infer bed type only from visible pillow count using: 1 pillow = single_bed, 2 pillows = semi_double_bed, 3-4 pillows = double_bed.\n"
+            "Do not invent objects that are not visible.\n"
+            "Return valid JSON only. No markdown."
+        )
+
+    def _style_reference_semantic_prompt(self, reference_type: str) -> str:
+        reference_guidance = {
+            "ideal": "Extract positive watercolor cues to emulate.",
+            "acceptable": "Extract cues that are acceptable but not necessarily ideal.",
+            "ng": "Extract cues to avoid in later watercolor rendering.",
+        }.get(reference_type, "Analyze this style reference image.")
+        return (
+            "Analyze the uploaded watercolor style reference image and return JSON only.\n"
+            "This is semantic style analysis only. Do not generate images.\n"
+            f"Reference type: {reference_type}. {reference_guidance}\n"
+            "Return keys: watercolor_strength, linework_style, palette_keywords, positive_cues, avoid_cues, notes.\n"
+            "Focus on palette, line clarity, texture density, readability, and overall watercolor feel.\n"
             "Return valid JSON only. No markdown."
         )
 
@@ -760,6 +2152,11 @@ class VisionAnalyzer:
                     "position": None,
                     "size": None,
                     "bounding_box": None,
+                    "approx_bbox": None,
+                    "polygon": None,
+                    "confidence": 0.0,
+                    "geometry_confidence": 0.0,
+                    "geometry_notes": [],
                     "connected_to": [],
                 }
             room = room or {}
@@ -773,10 +2170,21 @@ class VisionAnalyzer:
             )
             return {
                 "type": room.get("type") or room.get("room_type") or room.get("label") or room.get("name") or "unknown",
-                "room_name": room.get("room_name") or room.get("name") or room.get("label"),
+                "room_name": room.get("room_name") or room.get("name") or room.get("label_original") or room.get("label"),
                 "position": room.get("position") or room.get("pos") or room.get("location"),
                 "size": room.get("size"),
                 "bounding_box": _coerce_bbox(room.get("bounding_box") or room.get("bbox") or room.get("bounds")),
+                "approx_bbox": _coerce_bbox(
+                    room.get("approx_bbox")
+                    or room.get("approximate_bbox")
+                    or room.get("bounding_box")
+                    or room.get("bbox")
+                    or room.get("bounds")
+                ),
+                "polygon": _coerce_polygon(room.get("polygon")),
+                "confidence": _coerce_float(room.get("confidence")) or 0.0,
+                "geometry_confidence": _coerce_float(room.get("geometry_confidence")) or 0.0,
+                "geometry_notes": coerce_list(room.get("geometry_notes")),
                 "connected_to": coerce_list(connected_to),
             }
 
@@ -785,6 +2193,12 @@ class VisionAnalyzer:
                 return {
                     "position": None,
                     "connects": [],
+                    "bounding_box": None,
+                    "approx_bbox": None,
+                    "polygon": None,
+                    "confidence": 0.0,
+                    "geometry_confidence": 0.0,
+                    "geometry_notes": [],
                 }
             door = door or {}
             connects = (
@@ -798,6 +2212,12 @@ class VisionAnalyzer:
             return {
                 "position": door.get("position") or door.get("pos") or door.get("location"),
                 "connects": coerce_list(connects),
+                "bounding_box": _coerce_bbox(door.get("bounding_box") or door.get("bbox")),
+                "approx_bbox": _coerce_bbox(door.get("approx_bbox") or door.get("approximate_bbox") or door.get("bbox") or door.get("bounding_box")),
+                "polygon": _coerce_polygon(door.get("polygon")),
+                "confidence": _coerce_float(door.get("confidence")) or 0.0,
+                "geometry_confidence": _coerce_float(door.get("geometry_confidence")) or 0.0,
+                "geometry_notes": coerce_list(door.get("geometry_notes")),
             }
 
         def coerce_window(window: dict) -> dict:
@@ -805,11 +2225,23 @@ class VisionAnalyzer:
                 return {
                     "position": None,
                     "room": None,
+                    "bounding_box": None,
+                    "approx_bbox": None,
+                    "polygon": None,
+                    "confidence": 0.0,
+                    "geometry_confidence": 0.0,
+                    "geometry_notes": [],
                 }
             window = window or {}
             return {
                 "position": window.get("position") or window.get("pos") or window.get("location"),
                 "room": window.get("room") or window.get("label") or window.get("belongs_to"),
+                "bounding_box": _coerce_bbox(window.get("bounding_box") or window.get("bbox")),
+                "approx_bbox": _coerce_bbox(window.get("approx_bbox") or window.get("approximate_bbox") or window.get("bbox") or window.get("bounding_box")),
+                "polygon": _coerce_polygon(window.get("polygon")),
+                "confidence": _coerce_float(window.get("confidence")) or 0.0,
+                "geometry_confidence": _coerce_float(window.get("geometry_confidence")) or 0.0,
+                "geometry_notes": coerce_list(window.get("geometry_notes")),
             }
 
         balcony = payload.get("balcony")
@@ -817,11 +2249,26 @@ class VisionAnalyzer:
             balcony = {
                 "exists": bool(balcony.get("exists", balcony.get("present", False))),
                 "position": balcony.get("position") or balcony.get("pos") or balcony.get("location"),
+                "bounding_box": _coerce_bbox(balcony.get("bounding_box") or balcony.get("bbox")),
+                "approx_bbox": _coerce_bbox(balcony.get("approx_bbox") or balcony.get("approximate_bbox") or balcony.get("bbox") or balcony.get("bounding_box")),
+                "polygon": _coerce_polygon(balcony.get("polygon")),
+                "confidence": _coerce_float(balcony.get("confidence")) or 0.0,
+                "geometry_confidence": _coerce_float(balcony.get("geometry_confidence")) or 0.0,
+                "geometry_notes": coerce_list(balcony.get("geometry_notes")),
             }
         elif balcony is None:
             balcony = None
         else:
-            balcony = {"exists": bool(balcony), "position": None}
+            balcony = {
+                "exists": bool(balcony),
+                "position": None,
+                "bounding_box": None,
+                "approx_bbox": None,
+                "polygon": None,
+                "confidence": 0.0,
+                "geometry_confidence": 0.0,
+                "geometry_notes": [],
+            }
 
         constraints = payload.get("constraints")
         if constraints is None:

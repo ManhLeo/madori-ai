@@ -19,6 +19,8 @@ dist/
 venv/
 env/
 
+docs/*
+
 # Runtime-generated files
 runs/*
 !runs/.gitkeep
@@ -28,6 +30,10 @@ uploads/*
 !uploads/.gitkeep
 benchmark_runs/*
 !benchmark_runs/.gitkeep
+storage/runs/*
+!storage/runs/.gitkeep
+storage/outputs/*
+!storage/outputs/.gitkeep
 
 # Local logs and scratch files
 *.log

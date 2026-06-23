@@ -13,6 +13,9 @@ OUTPUTS_DIR = BASE_DIR / "outputs"
 RUNS_DIR = BASE_DIR / "runs"
 STATIC_DIR = Path(__file__).resolve().parent / "static"
 VERCEL_RUNTIME_DIR = Path("/tmp/madori-ai")
+STORAGE_DIR = BASE_DIR / "storage"
+STORAGE_RUNS_DIR = STORAGE_DIR / "runs"
+STORAGE_OUTPUTS_DIR = STORAGE_DIR / "outputs"
 
 
 def is_vercel_runtime() -> bool:
@@ -33,7 +36,9 @@ class Settings(BaseSettings):
     outputs_dir: Path = OUTPUTS_DIR
     runs_dir: Path = RUNS_DIR
     static_dir: Path = STATIC_DIR
-    image_provider: str = Field(default="stub", validation_alias="IMAGE_PROVIDER")
+    storage_dir: Path = STORAGE_DIR
+    storage_runs_dir: Path = STORAGE_RUNS_DIR
+    storage_outputs_dir: Path = STORAGE_OUTPUTS_DIR
     output_match_input_size: bool = Field(default=True, validation_alias="OUTPUT_MATCH_INPUT_SIZE")
     output_size_mode: str = Field(default="fixed", validation_alias="OUTPUT_SIZE_MODE")
     output_width: int = Field(default=1200, validation_alias="OUTPUT_WIDTH")
@@ -60,29 +65,42 @@ class Settings(BaseSettings):
     layout_guard_ignore_canvas_border: bool = Field(default=True, validation_alias="LAYOUT_GUARD_IGNORE_CANVAS_BORDER")
     layout_content_bbox_padding: int = Field(default=8, validation_alias="LAYOUT_CONTENT_BBOX_PADDING")
     layout_lock_reapply_structure: bool = Field(default=True, validation_alias="LAYOUT_LOCK_REAPPLY_STRUCTURE")
-    label_ocr_provider: str = Field(default="none", validation_alias="LABEL_OCR_PROVIDER")
-    label_ocr_enabled: bool = Field(default=False, validation_alias="LABEL_OCR_ENABLED")
+    room_zone_detection_enabled: bool = Field(default=True, validation_alias="ROOM_ZONE_DETECTION_ENABLED")
+    room_zone_min_area: int = Field(default=1500, validation_alias="ROOM_ZONE_MIN_AREA")
+    room_zone_max_area_ratio: float = Field(default=0.65, validation_alias="ROOM_ZONE_MAX_AREA_RATIO")
+    room_zone_morph_close_iterations: int = Field(default=2, validation_alias="ROOM_ZONE_MORPH_CLOSE_ITERATIONS")
+    room_zone_padding: int = Field(default=4, validation_alias="ROOM_ZONE_PADDING")
+    room_zone_debug_enabled: bool = Field(default=True, validation_alias="ROOM_ZONE_DEBUG_ENABLED")
+    interior_mask_enabled: bool = Field(default=True, validation_alias="INTERIOR_MASK_ENABLED")
+    furniture_placement_use_room_zones: bool = Field(default=True, validation_alias="FURNITURE_PLACEMENT_USE_ROOM_ZONES")
     label_auto_apply_enabled: bool = Field(default=False, validation_alias="LABEL_AUTO_APPLY_ENABLED")
     label_auto_apply_confidence_threshold: float = Field(default=0.85, validation_alias="LABEL_AUTO_APPLY_CONFIDENCE_THRESHOLD")
-    GOOGLE_APPLICATION_CREDENTIALS: str | None = Field(
-        default_factory=lambda: os.getenv("GOOGLE_APPLICATION_CREDENTIALS"),
-        validation_alias="GOOGLE_APPLICATION_CREDENTIALS",
-    )
-    google_cloud_project: str | None = Field(default=None, validation_alias="GOOGLE_CLOUD_PROJECT")
-    label_ocr_language_hints: str = Field(default="ja,en", validation_alias="LABEL_OCR_LANGUAGE_HINTS")
-    fluxapi_api_key: str | None = Field(default=None, validation_alias="FLUXAPI_API_KEY")
-    fluxapi_model: str = Field(default="flux-kontext-pro", validation_alias="FLUXAPI_MODEL")
-    fluxapi_input_image_url: str | None = Field(default=None, validation_alias="FLUXAPI_INPUT_IMAGE_URL")
-    fluxapi_input_image_format: str = Field(default="jpg", validation_alias="FLUXAPI_INPUT_IMAGE_FORMAT")
-    fluxapi_enable_translation: bool = Field(default=False, validation_alias="FLUXAPI_ENABLE_TRANSLATION")
-    fluxapi_timeout_seconds: int = Field(default=600, validation_alias="FLUXAPI_TIMEOUT_SECONDS")
-    fluxapi_poll_interval_seconds: int = Field(default=5, validation_alias="FLUXAPI_POLL_INTERVAL_SECONDS")
+    openai_api_key: str | None = Field(default=None, validation_alias="OPENAI_API_KEY")
+    vision_provider: str = Field(default="openai", validation_alias="VISION_PROVIDER")
+    openai_analysis_model: str = Field(default="gpt-5.4", validation_alias="OPENAI_ANALYSIS_MODEL")
+    openai_analysis_timeout_seconds: int = Field(default=90, validation_alias="OPENAI_ANALYSIS_TIMEOUT_SECONDS")
+    openai_analysis_max_output_tokens: int = Field(default=4096, validation_alias="OPENAI_ANALYSIS_MAX_OUTPUT_TOKENS")
+    openai_image_model: str = Field(default="gpt-image-1", validation_alias="OPENAI_IMAGE_MODEL")
+    openai_image_output_size: str = Field(default="1200x1200", validation_alias="OPENAI_IMAGE_OUTPUT_SIZE")
+    openai_image_provider_size: str = Field(default="1024x1024", validation_alias="OPENAI_IMAGE_PROVIDER_SIZE")
+    openai_image_final_output_size: str = Field(default="1200x1200", validation_alias="OPENAI_IMAGE_FINAL_OUTPUT_SIZE")
+    enable_openai_image_generation: bool = Field(default=False, validation_alias="ENABLE_OPENAI_IMAGE_GENERATION")
+    openai_image_dry_run: bool = Field(default=True, validation_alias="OPENAI_IMAGE_DRY_RUN")
+    openai_image_max_images: int = Field(default=1, validation_alias="OPENAI_IMAGE_MAX_IMAGES")
+    openai_image_max_input_images: int = Field(default=5, validation_alias="OPENAI_IMAGE_MAX_INPUT_IMAGES")
+    openai_image_output_format: str = Field(default="png", validation_alias="OPENAI_IMAGE_OUTPUT_FORMAT")
+    openai_image_quality: str = Field(default="auto", validation_alias="OPENAI_IMAGE_QUALITY")
+    openai_image_prompt_mode: str = Field(default="default", validation_alias="OPENAI_IMAGE_PROMPT_MODE")
+    openai_image_require_structure_reference: bool = Field(default=True, validation_alias="OPENAI_IMAGE_REQUIRE_STRUCTURE_REFERENCE")
+    openai_image_allow_prompt_only: bool = Field(default=False, validation_alias="OPENAI_IMAGE_ALLOW_PROMPT_ONLY")
     cloudinary_cloud_name: str | None = Field(default=None, validation_alias="CLOUDINARY_CLOUD_NAME")
     cloudinary_api_key: str | None = Field(default=None, validation_alias="CLOUDINARY_API_KEY")
     cloudinary_api_secret: str | None = Field(default=None, validation_alias="CLOUDINARY_API_SECRET")
     gemini_api_key: str | None = Field(default=None, validation_alias="GEMINI_API_KEY")
     gemini_model: str = Field(default="gemini-2.5-flash", validation_alias="GEMINI_MODEL")
     use_gemini_analysis: bool = Field(default=False, validation_alias="USE_GEMINI_ANALYSIS")
+    gemini_retry_attempts: int = Field(default=3, validation_alias="GEMINI_RETRY_ATTEMPTS")
+    gemini_retry_delay_seconds: float = Field(default=2.0, validation_alias="GEMINI_RETRY_DELAY_SECONDS")
 
     model_config = SettingsConfigDict(
         env_prefix="MADORI_",
@@ -100,9 +118,14 @@ def get_settings() -> Settings:
         settings.uploads_dir = runtime_dir / "uploads"
         settings.outputs_dir = runtime_dir / "outputs"
         settings.runs_dir = runtime_dir / "runs"
+        settings.storage_dir = runtime_dir / "storage"
+        settings.storage_runs_dir = settings.storage_dir / "runs"
+        settings.storage_outputs_dir = settings.storage_dir / "outputs"
 
     settings.uploads_dir.mkdir(parents=True, exist_ok=True)
     settings.outputs_dir.mkdir(parents=True, exist_ok=True)
     settings.runs_dir.mkdir(parents=True, exist_ok=True)
+    settings.storage_runs_dir.mkdir(parents=True, exist_ok=True)
+    settings.storage_outputs_dir.mkdir(parents=True, exist_ok=True)
     settings.static_dir.mkdir(parents=True, exist_ok=True)
     return settings

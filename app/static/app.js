@@ -1,127 +1,471 @@
 const form = document.querySelector("#generateForm");
-const fileInput = document.querySelector("#floorplanInput");
+const floorplanInput = document.querySelector("#floorplanInput");
+const interiorPhotosInput = document.querySelector("#interiorPhotosInput");
 const fileName = document.querySelector("#fileName");
+const interiorFileNames = document.querySelector("#interiorFileNames");
 const statusEl = document.querySelector("#formStatus");
+const generateButton = document.querySelector("#generateButton");
+const pipelinePanel = document.querySelector("#pipelinePanel");
+const currentStepLabel = document.querySelector("#currentStepLabel");
+const progressList = document.querySelector("#progressList");
+const errorBox = document.querySelector("#errorBox");
+const uploadDebugPanel = document.querySelector("#uploadDebugPanel");
+const debugFloorplanName = document.querySelector("#debugFloorplanName");
+const debugInteriorCount = document.querySelector("#debugInteriorCount");
+const debugInteriorNames = document.querySelector("#debugInteriorNames");
+const debugBackendInteriorCount = document.querySelector("#debugBackendInteriorCount");
+const uploadDebugWarning = document.querySelector("#uploadDebugWarning");
+const selectedFloorplanGrid = document.querySelector("#selectedFloorplanGrid");
+const selectedFloorplanEmpty = document.querySelector("#selectedFloorplanEmpty");
+const selectedInteriorGrid = document.querySelector("#selectedInteriorGrid");
+const selectedInteriorEmpty = document.querySelector("#selectedInteriorEmpty");
+const selectedInteriorCountBadge = document.querySelector("#selectedInteriorCountBadge");
+const backendAssetsSection = document.querySelector("#backendAssetsSection");
+const backendFloorplanGrid = document.querySelector("#backendFloorplanGrid");
+const backendFloorplanEmpty = document.querySelector("#backendFloorplanEmpty");
+const backendInteriorGrid = document.querySelector("#backendInteriorGrid");
+const backendInteriorEmpty = document.querySelector("#backendInteriorEmpty");
+const backendInteriorCountBadge = document.querySelector("#backendInteriorCountBadge");
 const resultPanel = document.querySelector("#resultPanel");
 const inputPreviewImage = document.querySelector("#inputPreviewImage");
 const outputImage = document.querySelector("#outputImage");
 const downloadOutputBtn = document.querySelector("#downloadOutputBtn");
-const overlayImage = document.querySelector("#overlayImage");
-const overlayDebugImage = document.querySelector("#overlayDebugImage");
-const qualitySummaryPanel = document.querySelector("#qualitySummaryPanel");
-const manualReviewBadge = document.querySelector("#manualReviewBadge");
-const qualityOutputSize = document.querySelector("#qualityOutputSize");
-const qualityEnglishLabels = document.querySelector("#qualityEnglishLabels");
-const detectedLabelBoxCount = document.querySelector("#detectedLabelBoxCount");
-const ocrTextBoxCount = document.querySelector("#ocrTextBoxCount");
-const autoLabelSuggestionCount = document.querySelector("#autoLabelSuggestionCount");
-const qualityLayoutAccuracy = document.querySelector("#qualityLayoutAccuracy");
-const layoutLockStatus = document.querySelector("#layoutLockStatus");
-const layoutGuardScore = document.querySelector("#layoutGuardScore");
-const layoutGuardCompareRegion = document.querySelector("#layoutGuardCompareRegion");
-const layoutLockPreview = document.querySelector("#layoutLockPreview");
-const normalizedFloorplanLink = document.querySelector("#normalizedFloorplanLink");
-const structureMaskLink = document.querySelector("#structureMaskLink");
-const structureLayerLink = document.querySelector("#structureLayerLink");
-const layoutDiffLink = document.querySelector("#layoutDiffLink");
-const layoutGuardReferenceCropLink = document.querySelector("#layoutGuardReferenceCropLink");
-const layoutGuardOutputCropLink = document.querySelector("#layoutGuardOutputCropLink");
-const aiDraftOutputLink = document.querySelector("#aiDraftOutputLink");
-const normalizedFloorplanImage = document.querySelector("#normalizedFloorplanImage");
-const layoutDiffImage = document.querySelector("#layoutDiffImage");
-const qualityWatercolor = document.querySelector("#qualityWatercolor");
-const manualLabelsJson = document.querySelector("#manualLabelsJson");
-const saveManualLabelsBtn = document.querySelector("#saveManualLabelsBtn");
-const applyManualLabelsBtn = document.querySelector("#applyManualLabelsBtn");
-const autoDetectLabelsBtn = document.querySelector("#autoDetectLabelsBtn");
-const manualLabelsStatus = document.querySelector("#manualLabelsStatus");
-const manualLabelTextInput = document.querySelector("#manualLabelTextInput");
-const addLabelBoxBtn = document.querySelector("#addLabelBoxBtn");
-const labelImageEditor = document.querySelector("#labelImageEditor");
-const labelEditorImage = document.querySelector("#labelEditorImage");
-const labelEditorOverlay = document.querySelector("#labelEditorOverlay");
+const runIdText = document.querySelector("#runIdText");
+const outputUrlLink = document.querySelector("#outputUrlLink");
+
+const PIPELINE_STEPS = [
+  ["Inspecting input", "inspect"],
+  ["Preprocessing floorplan", "preprocess-floorplan"],
+  ["Analyzing floorplan", "analyze-floorplan"],
+  ["Validating floorplan", "validate-floorplan-analysis"],
+  ["Analyzing interiors", "analyze-interiors"],
+  ["Validating interiors", "validate-interior-analysis"],
+  ["Creating layout", "create-initial-layout"],
+  ["Validating layout", "validate-layout"],
+  ["Planning furniture", "plan-furniture-placement"],
+  ["Validating furniture", "validate-furniture-placement"],
+  ["Creating render plan", "create-render-plan"],
+  ["Creating prompt package", "create-prompt-package"],
+  ["Previewing image generation request", "preview-image-generation-request"],
+];
 
 let currentInputPreviewUrl = null;
-let currentDownloadUrl = "";
+let currentOutputUrl = "";
 let currentRunId = "";
-let labelDrawMode = false;
-let labelDraft = null;
+let selectedFloorplanPreviewUrl = null;
+let selectedInteriorPreviewUrls = [];
 
-fileInput?.addEventListener("change", () => {
-  const file = fileInput.files?.[0];
-  fileName.textContent = file ? file.name : "ファイル未選択";
-  clearOutputPreview();
+initializeProgressList();
+renderSelectedFloorplanPreview(null);
+renderSelectedInteriorPreviews([]);
 
+floorplanInput?.addEventListener("change", () => {
+  const file = floorplanInput.files?.[0];
+  fileName.textContent = file ? file.name : "No floorplan selected";
+  clearRunArtifacts();
+  renderSelectedFloorplanPreview(file || null);
   if (file) {
     showInputPreview(file);
     resultPanel.hidden = false;
   } else {
     clearInputPreview();
-    resultPanel.hidden = true;
   }
+});
+
+interiorPhotosInput?.addEventListener("change", () => {
+  const files = Array.from(interiorPhotosInput.files || []);
+  interiorFileNames.textContent = files.length
+    ? files.map((file) => file.name).join(", ")
+    : "No interior photos selected. Interior photos are optional.";
+  clearBackendAssetPreviews();
+  renderSelectedInteriorPreviews(files);
 });
 
 form?.addEventListener("submit", async (event) => {
   event.preventDefault();
-  const file = fileInput.files?.[0];
-  if (!file) {
-    setStatus("間取り図ファイルを選択してください。", true);
+
+  const floorplan = floorplanInput.files?.[0];
+  if (!floorplan) {
+    const message = "Please upload one floorplan image before starting.";
+    showError(message);
+    setStatus(message, true);
     return;
   }
 
-  const formData = new FormData(form);
-  setStatus("生成中です。AIが間取り図を解析し、イラストを作成しています...", false);
-  clearOutputPreview();
+  clearRunArtifacts();
+  resetProgress();
+  setRunning(true);
+  hideError();
   resultPanel.hidden = false;
 
   try {
-    const generatePayload = await postGenerate(formData);
-    const runId = generatePayload.run_id;
+    if (!interiorPhotosInput.files?.length) {
+      setStatus("No interior photos selected. Continuing with the floorplan only.", false);
+    }
+
+    const createPayload = await runStep("Creating run", async () => {
+      const interiorFiles = Array.from(interiorPhotosInput.files || []);
+      renderUploadDebug(floorplan, interiorFiles, null);
+
+      const formData = new FormData();
+      formData.append("floorplan", floorplan);
+      for (const photo of interiorFiles) {
+        formData.append("interior_photos", photo);
+      }
+      logCreateRunFormData(floorplan, interiorFiles, formData);
+      console.log("[flow] using staged endpoint: POST /api/runs");
+      return postForm("/api/runs", formData);
+    });
+
+    const runId = createPayload.run_id;
     if (!runId) {
-      throw new Error("生成レスポンスにrun_idが含まれていません。");
+      throw new Error("Backend did not return run_id after creating the run.");
+    }
+    currentRunId = runId;
+
+    const interiorFiles = Array.from(interiorPhotosInput.files || []);
+    const metadata = await resolveRunMetadata(runId);
+    const uploadedInteriorCount = getInteriorPhotoCount(metadata);
+    renderUploadDebug(floorplan, interiorFiles, uploadedInteriorCount);
+    renderBackendAssetPreviews(runId, metadata);
+    if (interiorFiles.length > 0 && uploadedInteriorCount === 0) {
+      showUploadWarning("Interior photos were selected but backend metadata shows 0 uploaded. Check multipart field name interior_photos.");
     }
 
-    renderGeneratedOutput(generatePayload);
-    setStatus(`生成結果を表示しました。Run ID: ${runId}`, false);
-
-    try {
-      const runPayload = await fetchRunInspection(runId);
-      renderRunResult(runPayload, generatePayload);
-    } catch (inspectionError) {
-      console.warn("Run inspection failed; keeping generated output_url preview.", inspectionError);
+    for (const [label, endpoint] of PIPELINE_STEPS) {
+      await runStep(label, () => postJson(`/api/runs/${encodeURIComponent(runId)}/${endpoint}`));
     }
+
+    const draft = await runStep("Generating OpenAI draft", () =>
+      postJson(`/api/runs/${encodeURIComponent(runId)}/generate-image-draft`, {
+        confirm_generation: true,
+        provider: "openai",
+        output_format: "png",
+        use_reference_images: true,
+        max_reference_images: 3,
+      }),
+    );
+
+    const loadedDraft = await runStep("Loading output image", async () => {
+      if (draft?.outputs) return draft;
+      return getJson(`/api/runs/${encodeURIComponent(runId)}/artifacts/image_generation_draft`);
+    });
+
+    const imageUrl = resolveDraftImageUrl(loadedDraft, runId);
+    renderDraftResult(runId, imageUrl);
+    markStepDone("Done");
+    setCurrentStep("Done");
+    setStatus("Generated draft is ready.", false);
   } catch (error) {
-    setStatus(error instanceof Error ? error.message : "生成に失敗しました。", true);
+    const message = friendlyErrorMessage(error);
+    showError(message);
+    setStatus(message, true);
+  } finally {
+    setRunning(false);
   }
 });
 
-async function postGenerate(formData) {
-  const response = await fetch("/api/generate", {
+async function runStep(label, fn) {
+  setCurrentStep(label);
+  markStepRunning(label);
+  try {
+    const result = await fn();
+    markStepDone(label);
+    return result;
+  } catch (error) {
+    markStepFailed(label);
+    throw error;
+  }
+}
+
+async function postForm(url, formData) {
+  const response = await fetch(url, {
     method: "POST",
     body: formData,
   });
-  const payload = await readJsonResponse(response, "POST /api/generate");
-  if (!response.ok) {
-    throw new Error(payload.detail || "POST /api/generate が失敗しました。");
-  }
-  return payload;
+  return readCheckedJson(response, url);
 }
 
-async function fetchRunInspection(runId) {
-  const response = await fetch(`/api/runs/${encodeURIComponent(runId)}`);
-  const payload = await readJsonResponse(response, `GET /api/runs/${runId}`);
-  if (!response.ok) {
-    throw new Error(payload.detail || `GET /api/runs/${runId} が失敗しました。`);
-  }
-  return payload;
+async function postJson(url, body) {
+  const response = await fetch(url, {
+    method: "POST",
+    headers: body ? { "Content-Type": "application/json" } : undefined,
+    body: body ? JSON.stringify(body) : undefined,
+  });
+  return readCheckedJson(response, url);
 }
 
-async function readJsonResponse(response, label) {
+async function getJson(url) {
+  const response = await fetch(url);
+  return readCheckedJson(response, url);
+}
+
+async function resolveRunMetadata(runId) {
+  const metadataPayload = await getJson(`/api/runs/${encodeURIComponent(runId)}/metadata`);
+  return getMetadataPayload(metadataPayload) || metadataPayload;
+}
+
+async function readCheckedJson(response, label) {
+  let payload = null;
   try {
-    return await response.json();
+    payload = await response.json();
   } catch {
-    throw new Error(`${label} のJSON解析に失敗しました。`);
+    payload = {};
   }
+
+  if (!response.ok) {
+    const detail = Array.isArray(payload.detail) ? payload.detail[0] : payload.detail;
+    throw new Error(detail || `${label} failed with HTTP ${response.status}`);
+  }
+  return payload;
+}
+
+function resolveDraftImageUrl(draft, runId) {
+  const rawPreview =
+    draft?.outputs?.generated_draft_raw_preview_url ||
+    draft?.outputs?.generated_draft_raw_url ||
+    draft?.outputs?.raw_image_preview_url ||
+    draft?.outputs?.raw_image_path ||
+    draft?.outputs?.output_preview_url ||
+    draft?.outputs?.draft_image_preview_url ||
+    draft?.outputs?.draft_image_path ||
+    draft?.generated_draft_raw_preview_url ||
+    draft?.output_preview_url ||
+    `/storage/runs/${runId}/artifacts/generated_draft_raw.png`;
+
+  return toUrl(rawPreview);
+}
+
+function fallbackDraftUrl(runId) {
+  return `/storage/runs/${runId}/outputs/${runId}_draft.png`;
+}
+
+function renderDraftResult(runId, imageUrl) {
+  currentRunId = runId;
+  currentOutputUrl = imageUrl;
+
+  outputImage.src = imageUrl;
+  outputImage.hidden = false;
+  outputImage.onerror = () => {
+    const fallbackUrl = fallbackDraftUrl(runId);
+    if (outputImage.src.endsWith(fallbackUrl)) return;
+    currentOutputUrl = fallbackUrl;
+    outputImage.src = fallbackUrl;
+    renderOutputUrl(fallbackUrl);
+  };
+
+  renderOutputUrl(imageUrl);
+  runIdText.textContent = `run_id: ${runId}`;
+  runIdText.hidden = false;
+  downloadOutputBtn.hidden = false;
+  resultPanel.hidden = false;
+}
+
+function renderUploadDebug(floorplanFile, interiorFiles, backendInteriorCount) {
+  if (!uploadDebugPanel) return;
+
+  debugFloorplanName.textContent = floorplanFile?.name || "-";
+  debugInteriorCount.textContent = String(interiorFiles.length);
+  debugInteriorNames.textContent = interiorFiles.length ? interiorFiles.map((file) => file.name).join(", ") : "-";
+  debugBackendInteriorCount.textContent = backendInteriorCount === null || backendInteriorCount === undefined ? "-" : String(backendInteriorCount);
+  uploadDebugPanel.hidden = false;
+  if (!interiorFiles.length) {
+    showUploadWarning("No interior photos selected. This is allowed, but furniture signals may be weaker.");
+  } else {
+    hideUploadWarning();
+  }
+}
+
+function renderSelectedFloorplanPreview(file) {
+  if (selectedFloorplanPreviewUrl) {
+    URL.revokeObjectURL(selectedFloorplanPreviewUrl);
+    selectedFloorplanPreviewUrl = null;
+  }
+
+  if (!selectedFloorplanGrid || !selectedFloorplanEmpty) return;
+  selectedFloorplanGrid.innerHTML = "";
+
+  if (!file) {
+    selectedFloorplanGrid.hidden = true;
+    selectedFloorplanEmpty.hidden = false;
+    return;
+  }
+
+  selectedFloorplanPreviewUrl = URL.createObjectURL(file);
+  selectedFloorplanGrid.appendChild(
+    createAssetCard({
+      previewUrl: selectedFloorplanPreviewUrl,
+      name: file.name,
+      metaLines: [formatFileSize(file.size)],
+      kind: "local",
+    }),
+  );
+  selectedFloorplanGrid.hidden = false;
+  selectedFloorplanEmpty.hidden = true;
+}
+
+function renderSelectedInteriorPreviews(files) {
+  revokeSelectedInteriorPreviewUrls();
+  if (!selectedInteriorGrid || !selectedInteriorEmpty || !selectedInteriorCountBadge) return;
+
+  selectedInteriorGrid.innerHTML = "";
+  selectedInteriorCountBadge.textContent = String(files.length);
+
+  if (!files.length) {
+    selectedInteriorGrid.hidden = true;
+    selectedInteriorEmpty.hidden = false;
+    return;
+  }
+
+  for (const file of files) {
+    const previewUrl = URL.createObjectURL(file);
+    selectedInteriorPreviewUrls.push(previewUrl);
+    selectedInteriorGrid.appendChild(
+      createAssetCard({
+        previewUrl,
+        name: file.name,
+        metaLines: [formatFileSize(file.size)],
+        kind: "local",
+      }),
+    );
+  }
+
+  selectedInteriorGrid.hidden = false;
+  selectedInteriorEmpty.hidden = true;
+}
+
+function renderBackendAssetPreviews(runId, metadata) {
+  if (!backendAssetsSection) return;
+
+  const floorplan = getFloorplanAsset(metadata);
+  const interiorPhotos = getInteriorPhotoAssets(metadata);
+  backendAssetsSection.hidden = false;
+
+  renderBackendAssetGrid({
+    grid: backendFloorplanGrid,
+    emptyEl: backendFloorplanEmpty,
+    assets: floorplan ? [floorplan] : [],
+    runId,
+  });
+  renderBackendAssetGrid({
+    grid: backendInteriorGrid,
+    emptyEl: backendInteriorEmpty,
+    assets: interiorPhotos,
+    runId,
+  });
+
+  if (backendInteriorCountBadge) {
+    backendInteriorCountBadge.textContent = String(interiorPhotos.length);
+  }
+}
+
+function renderBackendAssetGrid({ grid, emptyEl, assets, runId }) {
+  if (!grid || !emptyEl) return;
+  grid.innerHTML = "";
+
+  if (!assets.length) {
+    grid.hidden = true;
+    emptyEl.hidden = false;
+    return;
+  }
+
+  for (const asset of assets) {
+    grid.appendChild(
+      createAssetCard({
+        previewUrl: resolveAssetPreviewUrl(asset, runId),
+        name: asset.original_filename || asset.filename || asset.stored_filename || "Uploaded asset",
+        metaLines: [
+          asset.mime_type || asset.content_type || null,
+          typeof asset.size_bytes === "number" ? formatFileSize(asset.size_bytes) : null,
+        ].filter(Boolean),
+        kind: "backend",
+      }),
+    );
+  }
+
+  grid.hidden = false;
+  emptyEl.hidden = true;
+}
+
+function createAssetCard({ previewUrl, name, metaLines, kind }) {
+  const card = document.createElement("article");
+  card.className = "asset-card";
+
+  const imageWrap = document.createElement("div");
+  imageWrap.className = "asset-thumb-wrap";
+
+  const image = document.createElement("img");
+  image.className = "asset-thumb";
+  image.alt = name || `${kind} asset preview`;
+  image.loading = "lazy";
+
+  const fallback = document.createElement("div");
+  fallback.className = "asset-thumb-fallback";
+  fallback.textContent = "Preview unavailable";
+  fallback.hidden = true;
+
+  image.onerror = () => {
+    image.hidden = true;
+    fallback.hidden = false;
+  };
+
+  if (previewUrl) {
+    image.src = previewUrl;
+    image.hidden = false;
+  } else {
+    image.hidden = true;
+    fallback.hidden = false;
+  }
+
+  imageWrap.append(image, fallback);
+
+  const content = document.createElement("div");
+  content.className = "asset-card-body";
+
+  const title = document.createElement("p");
+  title.className = "asset-name";
+  title.textContent = name || "Unnamed file";
+
+  const meta = document.createElement("p");
+  meta.className = "asset-meta";
+  meta.textContent = metaLines.length ? metaLines.join(" • ") : "Metadata unavailable";
+
+  content.append(title, meta);
+  card.append(imageWrap, content);
+  return card;
+}
+
+function showUploadWarning(message) {
+  if (!uploadDebugWarning) return;
+  uploadDebugWarning.textContent = message;
+  uploadDebugWarning.hidden = false;
+}
+
+function hideUploadWarning() {
+  if (!uploadDebugWarning) return;
+  uploadDebugWarning.textContent = "";
+  uploadDebugWarning.hidden = true;
+}
+
+function logCreateRunFormData(floorplanFile, interiorFiles, formData) {
+  console.log("[upload] floorplan:", floorplanFile?.name || null);
+  console.log("[upload] interior count:", interiorFiles.length);
+  console.log("[upload] interiors:", interiorFiles.map((file) => file.name));
+  console.log("[upload] formData entries:");
+  for (const [key, value] of formData.entries()) {
+    console.log(" -", key, value instanceof File ? value.name : value);
+  }
+}
+
+function getInteriorPhotoCount(payload) {
+  const assets = getInteriorPhotoAssets(payload);
+  return assets ? assets.length : null;
+}
+
+function renderOutputUrl(imageUrl) {
+  outputUrlLink.href = imageUrl;
+  outputUrlLink.textContent = imageUrl;
+  outputUrlLink.hidden = false;
 }
 
 function showInputPreview(file) {
@@ -140,84 +484,137 @@ function clearInputPreview() {
   inputPreviewImage.hidden = true;
 }
 
-function renderRunResult(runPayload, generatePayload) {
-  const files = runPayload.files || {};
-  const outputUrl = runPayload.output_url || generatePayload.output_url || toRunUrl(files.output) || "";
-  currentRunId = runPayload.run_id || generatePayload.run_id || "";
-  currentDownloadUrl = outputUrl;
-
-  setOutputPreviewUrl(outputUrl);
-  outputImage.hidden = !outputUrl;
-  downloadOutputBtn.hidden = !outputUrl;
-
-  if (overlayImage) {
-    const overlayUrl = toRunUrl(files.overlay);
-    overlayImage.src = overlayUrl;
-    overlayImage.hidden = !overlayUrl;
-  }
-
-  if (overlayDebugImage) {
-    const overlayDebugUrl = toRunUrl(files.overlay_debug);
-    overlayDebugImage.src = overlayDebugUrl;
-    overlayDebugImage.hidden = !overlayDebugUrl;
-  }
-
-  renderQualitySummary(
-    runPayload.quality_check,
-    runPayload.output_label_edit,
-    runPayload.generation_debug,
-    runPayload.detected_label_boxes,
-    runPayload.ocr_text_boxes,
-    runPayload.auto_label_suggestions,
-    files,
-  );
-  renderManualLabels(runPayload.manual_labels);
-
-  resultPanel.hidden = false;
+function clearResult() {
+  clearRunArtifacts();
+  clearSelectedAssetPreviews();
+  clearInputPreview();
+  resultPanel.hidden = true;
 }
 
-function renderGeneratedOutput(generatePayload) {
-  const outputUrl = generatePayload.output_url || "";
-  currentRunId = generatePayload.run_id || "";
-  currentDownloadUrl = outputUrl;
-
-  setOutputPreviewUrl(outputUrl);
-  outputImage.hidden = !outputUrl;
-  downloadOutputBtn.hidden = !outputUrl;
-  resultPanel.hidden = false;
-}
-
-function clearOutputPreview() {
+function clearRunArtifacts() {
+  currentOutputUrl = "";
+  currentRunId = "";
   outputImage.removeAttribute("src");
   outputImage.hidden = true;
-  if (labelEditorImage) {
-    labelEditorImage.removeAttribute("src");
-  }
-  if (labelImageEditor) {
-    labelImageEditor.hidden = true;
-  }
-  currentDownloadUrl = "";
-  currentRunId = "";
+  outputImage.onerror = null;
   downloadOutputBtn.hidden = true;
-
-  if (overlayImage) {
-    overlayImage.removeAttribute("src");
-    overlayImage.hidden = true;
+  runIdText.textContent = "";
+  runIdText.hidden = true;
+  outputUrlLink.removeAttribute("href");
+  outputUrlLink.textContent = "";
+  outputUrlLink.hidden = true;
+  if (uploadDebugPanel) {
+    uploadDebugPanel.hidden = true;
   }
-
-  if (overlayDebugImage) {
-    overlayDebugImage.removeAttribute("src");
-    overlayDebugImage.hidden = true;
+  if (debugFloorplanName) {
+    debugFloorplanName.textContent = "-";
   }
-
-  clearQualitySummary();
-  clearManualLabelsEditor();
+  if (debugInteriorCount) {
+    debugInteriorCount.textContent = "0";
+  }
+  if (debugInteriorNames) {
+    debugInteriorNames.textContent = "-";
+  }
+  if (debugBackendInteriorCount) {
+    debugBackendInteriorCount.textContent = "-";
+  }
+  pipelinePanel.hidden = true;
+  hideUploadWarning();
+  hideError();
 }
 
-function toRunUrl(path) {
-  if (!path) return "";
-  if (/^https?:\/\//.test(path)) return path;
-  return path.startsWith("/") ? path : `/${path}`;
+function clearSelectedAssetPreviews() {
+  renderSelectedFloorplanPreview(null);
+  renderSelectedInteriorPreviews([]);
+}
+
+function clearBackendAssetPreviews() {
+  if (backendAssetsSection) {
+    backendAssetsSection.hidden = true;
+  }
+  if (backendFloorplanGrid) {
+    backendFloorplanGrid.innerHTML = "";
+    backendFloorplanGrid.hidden = true;
+  }
+  if (backendInteriorGrid) {
+    backendInteriorGrid.innerHTML = "";
+    backendInteriorGrid.hidden = true;
+  }
+  if (backendFloorplanEmpty) {
+    backendFloorplanEmpty.hidden = false;
+  }
+  if (backendInteriorEmpty) {
+    backendInteriorEmpty.hidden = false;
+  }
+  if (backendInteriorCountBadge) {
+    backendInteriorCountBadge.textContent = "0";
+  }
+}
+
+function revokeSelectedInteriorPreviewUrls() {
+  for (const previewUrl of selectedInteriorPreviewUrls) {
+    URL.revokeObjectURL(previewUrl);
+  }
+  selectedInteriorPreviewUrls = [];
+}
+
+downloadOutputBtn?.addEventListener("click", () => {
+  if (!currentOutputUrl) return;
+  const link = document.createElement("a");
+  link.href = currentOutputUrl;
+  link.download = `madori-ai-${currentRunId || "draft"}.png`;
+  document.body.appendChild(link);
+  link.click();
+  link.remove();
+});
+
+function initializeProgressList() {
+  if (!progressList) return;
+  const labels = ["Creating run", ...PIPELINE_STEPS.map(([label]) => label), "Generating OpenAI draft", "Loading output image", "Done"];
+  progressList.innerHTML = "";
+  for (const label of labels) {
+    const item = document.createElement("li");
+    item.dataset.step = label;
+    item.textContent = label;
+    progressList.appendChild(item);
+  }
+}
+
+function resetProgress() {
+  pipelinePanel.hidden = false;
+  for (const item of progressList.querySelectorAll("li")) {
+    item.className = "";
+  }
+  setCurrentStep("Creating run");
+}
+
+function setCurrentStep(label) {
+  if (currentStepLabel) {
+    currentStepLabel.textContent = label;
+  }
+}
+
+function markStepRunning(label) {
+  const item = progressList.querySelector(`[data-step="${cssEscape(label)}"]`);
+  if (!item) return;
+  item.className = "is-running";
+}
+
+function markStepDone(label) {
+  const item = progressList.querySelector(`[data-step="${cssEscape(label)}"]`);
+  if (!item) return;
+  item.className = "is-done";
+}
+
+function markStepFailed(label) {
+  const item = progressList.querySelector(`[data-step="${cssEscape(label)}"]`);
+  if (!item) return;
+  item.className = "is-failed";
+}
+
+function setRunning(isRunning) {
+  generateButton.disabled = isRunning;
+  generateButton.textContent = isRunning ? "Generating..." : "Generate Draft";
 }
 
 function setStatus(message, isError) {
@@ -225,417 +622,89 @@ function setStatus(message, isError) {
   statusEl.classList.toggle("is-error", Boolean(isError));
 }
 
-function renderQualitySummary(qualityCheck, outputLabelEdit, generationDebug, detectedLabelBoxes, ocrTextBoxes, autoLabelSuggestions, files = {}) {
-  if (!qualitySummaryPanel || !qualityCheck) return;
-
-  const actualSize = qualityCheck.output_size_actual || formatOutputSize(generationDebug);
-  const requiredSize = qualityCheck.output_size_required || "";
-  qualityOutputSize.textContent = requiredSize && actualSize ? `${actualSize} / required ${requiredSize}` : actualSize || "-";
-  qualityEnglishLabels.textContent = outputLabelEdit?.status || qualityCheck.english_labels_status || "-";
-  if (detectedLabelBoxCount) {
-    detectedLabelBoxCount.textContent = String(detectedLabelBoxes?.boxes?.length ?? 0);
-  }
-  if (ocrTextBoxCount) {
-    ocrTextBoxCount.textContent = String(ocrTextBoxes?.texts?.length ?? qualityCheck.ocr_text_count ?? 0);
-  }
-  if (autoLabelSuggestionCount) {
-    autoLabelSuggestionCount.textContent = String(autoLabelSuggestions?.labels?.length ?? qualityCheck.auto_label_suggestion_count ?? 0);
-  }
-  qualityLayoutAccuracy.textContent = qualityCheck.layout_accuracy_status || "manual_review_required";
-  if (layoutLockStatus) {
-    const lockEnabled = qualityCheck.layout_lock_enabled ?? Boolean(generationDebug?.layout_locked_render);
-    const guardStatus = qualityCheck.layout_guard_status || generationDebug?.layout_guard?.status || "not_run";
-    layoutLockStatus.textContent = lockEnabled ? `enabled / ${guardStatus}` : "disabled";
-  }
-  if (layoutGuardScore) {
-    const score = qualityCheck.layout_guard_score ?? generationDebug?.layout_guard?.score;
-    layoutGuardScore.textContent = score === null || score === undefined ? "-" : String(score);
-  }
-  if (layoutGuardCompareRegion) {
-    layoutGuardCompareRegion.textContent = qualityCheck.layout_guard_compare_region || generationDebug?.layout_guard_compare_region || "-";
-  }
-  renderLayoutLockPreview(files);
-  qualityWatercolor.textContent = qualityCheck.watercolor_quality_status || "manual_review_required";
-
-  if (manualReviewBadge) {
-    manualReviewBadge.hidden = !qualityCheck.needs_manual_review;
-  }
-  qualitySummaryPanel.hidden = false;
+function showError(message) {
+  errorBox.textContent = message;
+  errorBox.hidden = false;
 }
 
-function renderManualLabels(manualLabels) {
-  if (!manualLabelsJson) return;
-  manualLabelsJson.value = JSON.stringify(manualLabels || emptyManualLabels(), null, 2);
-  renderLabelOverlayBoxes();
-  setManualLabelsStatus("", false);
+function hideError() {
+  errorBox.textContent = "";
+  errorBox.hidden = true;
 }
 
-function clearQualitySummary() {
-  if (!qualitySummaryPanel) return;
-  qualitySummaryPanel.hidden = true;
-  if (qualityOutputSize) qualityOutputSize.textContent = "-";
-  if (qualityEnglishLabels) qualityEnglishLabels.textContent = "-";
-  if (detectedLabelBoxCount) detectedLabelBoxCount.textContent = "-";
-  if (ocrTextBoxCount) ocrTextBoxCount.textContent = "-";
-  if (autoLabelSuggestionCount) autoLabelSuggestionCount.textContent = "-";
-  if (qualityLayoutAccuracy) qualityLayoutAccuracy.textContent = "Manual review required";
-  if (layoutLockStatus) layoutLockStatus.textContent = "-";
-  if (layoutGuardScore) layoutGuardScore.textContent = "-";
-  if (layoutGuardCompareRegion) layoutGuardCompareRegion.textContent = "-";
-  clearLayoutLockPreview();
-  if (qualityWatercolor) qualityWatercolor.textContent = "Manual review required";
+function friendlyErrorMessage(error) {
+  const message = error instanceof Error ? error.message : "Generation failed.";
+  if (
+    message.includes("ENABLE_OPENAI_IMAGE_GENERATION=true") ||
+    message.includes("OPENAI_IMAGE_DRY_RUN=false") ||
+    message.includes("OPENAI_API_KEY is required")
+  ) {
+    return "OpenAI generation is disabled on the backend. Enable ENABLE_OPENAI_IMAGE_GENERATION=true and OPENAI_IMAGE_DRY_RUN=false, then restart the backend.";
+  }
+  return message;
 }
 
-function renderLayoutLockPreview(files) {
-  if (!layoutLockPreview) return;
-  const links = [
-    [normalizedFloorplanLink, files.normalized_floorplan],
-    [structureMaskLink, files.structure_mask],
-    [structureLayerLink, files.structure_layer],
-    [layoutDiffLink, files.layout_diff],
-    [layoutGuardReferenceCropLink, files.layout_guard_reference_crop],
-    [layoutGuardOutputCropLink, files.layout_guard_output_crop],
-    [aiDraftOutputLink, files.ai_draft_output],
-  ];
-  let hasAny = false;
-  for (const [element, path] of links) {
-    if (!element) continue;
-    const url = toRunUrl(path);
-    element.href = url || "#";
-    element.hidden = !url;
-    hasAny = hasAny || Boolean(url);
+function getMetadataPayload(payload) {
+  if (!payload || typeof payload !== "object") return null;
+  if (payload.metadata && typeof payload.metadata === "object") {
+    return payload.metadata;
   }
-  const normalizedUrl = toRunUrl(files.normalized_floorplan);
-  if (normalizedFloorplanImage) {
-    normalizedFloorplanImage.src = normalizedUrl;
-    normalizedFloorplanImage.hidden = !normalizedUrl;
-  }
-  const diffUrl = toRunUrl(files.layout_diff);
-  if (layoutDiffImage) {
-    layoutDiffImage.src = diffUrl;
-    layoutDiffImage.hidden = !diffUrl;
-  }
-  layoutLockPreview.hidden = !hasAny;
+  return payload;
 }
 
-function clearLayoutLockPreview() {
-  if (!layoutLockPreview) return;
-  layoutLockPreview.hidden = true;
-  for (const element of [
-    normalizedFloorplanLink,
-    structureMaskLink,
-    structureLayerLink,
-    layoutDiffLink,
-    layoutGuardReferenceCropLink,
-    layoutGuardOutputCropLink,
-    aiDraftOutputLink,
-  ]) {
-    if (!element) continue;
-    element.removeAttribute("href");
-    element.hidden = true;
-  }
-  for (const image of [normalizedFloorplanImage, layoutDiffImage]) {
-    if (!image) continue;
-    image.removeAttribute("src");
-    image.hidden = true;
-  }
+function getFloorplanAsset(payload) {
+  const metadata = getMetadataPayload(payload);
+  if (!metadata || typeof metadata !== "object") return null;
+  return metadata.floorplan || metadata.inputs?.floorplan || null;
 }
 
-function clearManualLabelsEditor() {
-  if (manualLabelsJson) {
-    manualLabelsJson.value = "";
-  }
-  if (labelEditorOverlay) {
-    labelEditorOverlay.innerHTML = "";
-  }
-  labelDrawMode = false;
-  setManualLabelsStatus("", false);
-}
-
-function formatOutputSize(generationDebug) {
-  if (!generationDebug?.output_width || !generationDebug?.output_height) return "";
-  return `${generationDebug.output_width}x${generationDebug.output_height}`;
-}
-
-function setOutputPreviewUrl(outputUrl) {
-  if (outputImage) {
-    outputImage.src = outputUrl;
-  }
-  if (labelEditorImage && labelImageEditor) {
-    labelEditorImage.src = outputUrl;
-    labelImageEditor.hidden = !outputUrl;
-    labelEditorImage.addEventListener("load", renderLabelOverlayBoxes, { once: true });
-  }
-}
-
-downloadOutputBtn?.addEventListener("click", async () => {
-  if (!currentDownloadUrl) return;
-
-  try {
-    const response = await fetch(currentDownloadUrl);
-    if (!response.ok) {
-      throw new Error("download request failed");
+function getInteriorPhotoAssets(payload) {
+  const metadata = getMetadataPayload(payload);
+  if (!metadata || typeof metadata !== "object") return [];
+  const candidates = [metadata.interior_photos, metadata.inputs?.interior_photos];
+  for (const candidate of candidates) {
+    if (Array.isArray(candidate)) {
+      return candidate;
     }
-    const blob = await response.blob();
-    const objectUrl = URL.createObjectURL(blob);
-    const link = document.createElement("a");
-    link.href = objectUrl;
-    link.download = `madori-ai-${currentRunId || "output"}.png`;
-    document.body.appendChild(link);
-    link.click();
-    link.remove();
-    URL.revokeObjectURL(objectUrl);
-  } catch (error) {
-    console.warn("Blob download failed; falling back to direct navigation.", error);
-    window.location.href = toAttachmentUrl(currentDownloadUrl, currentRunId);
   }
-});
-
-function toAttachmentUrl(url, runId) {
-  if (!url || !url.includes("res.cloudinary.com") || !url.includes("/upload/")) {
-    return url;
-  }
-  const filename = `madori-ai-${runId || "output"}`;
-  return url.replace("/upload/", `/upload/fl_attachment:${encodeURIComponent(filename)}/`);
+  return [];
 }
 
-saveManualLabelsBtn?.addEventListener("click", async () => {
-  if (!currentRunId) return;
-  try {
-    const payload = parseManualLabels();
-    const saved = await putManualLabels(currentRunId, payload);
-    renderManualLabels(saved);
-    setManualLabelsStatus("Manual labels saved.", false);
-  } catch (error) {
-    setManualLabelsStatus(error instanceof Error ? error.message : "Failed to save manual labels.", true);
+function resolveAssetPreviewUrl(asset, runId) {
+  if (!asset || typeof asset !== "object") return "";
+  if (asset.preview_url) {
+    return toUrl(asset.preview_url);
   }
-});
-
-applyManualLabelsBtn?.addEventListener("click", async () => {
-  if (!currentRunId) return;
-  try {
-    const payload = parseManualLabels();
-    await putManualLabels(currentRunId, payload);
-    const applied = await applyManualLabels(currentRunId);
-    setManualLabelsStatus("Manual labels applied to output image.", false);
-    const runPayload = await fetchRunInspection(currentRunId);
-    renderRunResult(runPayload, { run_id: currentRunId, output_url: applied.output_url || currentDownloadUrl });
-    reloadOutputImage();
-  } catch (error) {
-    setManualLabelsStatus(error instanceof Error ? error.message : "Failed to apply manual labels.", true);
-  }
-});
-
-autoDetectLabelsBtn?.addEventListener("click", async () => {
-  if (!currentRunId) return;
-  try {
-    setManualLabelsStatus("Running OCR label detection...", false);
-    const detected = await autoDetectLabels(currentRunId);
-    if (detected.manual_labels) {
-      renderManualLabels(detected.manual_labels);
+  if (asset.relative_path) {
+    const relativePath = String(asset.relative_path).replace(/^\/+/, "");
+    const storagePrefix = `storage/runs/${runId}/`;
+    if (relativePath.startsWith(storagePrefix)) {
+      return `/${relativePath}`;
     }
-    const runPayload = await fetchRunInspection(currentRunId);
-    renderRunResult(runPayload, { run_id: currentRunId, output_url: currentDownloadUrl });
-    setManualLabelsStatus(
-      `Auto detect complete. OCR texts: ${detected.ocr_text_count || 0}, suggestions: ${detected.auto_label_suggestion_count || 0}.`,
-      false,
-    );
-  } catch (error) {
-    setManualLabelsStatus(error instanceof Error ? error.message : "Failed to auto detect labels.", true);
+    return `/storage/runs/${runId}/${relativePath}`;
   }
-});
+  return "";
+}
 
-function parseManualLabels() {
-  try {
-    return JSON.parse(manualLabelsJson?.value || "{}");
-  } catch {
-    throw new Error("Manual labels JSON is invalid.");
+function formatFileSize(bytes) {
+  if (typeof bytes !== "number" || !Number.isFinite(bytes) || bytes < 0) {
+    return "Size unknown";
   }
-}
-
-async function putManualLabels(runId, payload) {
-  const response = await fetch(`/api/runs/${encodeURIComponent(runId)}/manual-labels`, {
-    method: "PUT",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(payload),
-  });
-  const responsePayload = await readJsonResponse(response, `PUT /api/runs/${runId}/manual-labels`);
-  if (!response.ok) {
-    throw new Error(responsePayload.detail || "Failed to save manual labels.");
+  if (bytes < 1024 * 1024) {
+    return `${(bytes / 1024).toFixed(1)} KB`;
   }
-  return responsePayload;
+  return `${(bytes / (1024 * 1024)).toFixed(2)} MB`;
 }
 
-async function applyManualLabels(runId) {
-  const response = await fetch(`/api/runs/${encodeURIComponent(runId)}/apply-manual-labels`, {
-    method: "POST",
-  });
-  const responsePayload = await readJsonResponse(response, `POST /api/runs/${runId}/apply-manual-labels`);
-  if (!response.ok) {
-    throw new Error(responsePayload.detail || "Failed to apply manual labels.");
+function toUrl(path) {
+  if (!path) return "";
+  if (/^https?:\/\//.test(path)) return path;
+  return path.startsWith("/") ? path : `/${path}`;
+}
+
+function cssEscape(value) {
+  if (window.CSS?.escape) {
+    return CSS.escape(value);
   }
-  return responsePayload;
-}
-
-async function autoDetectLabels(runId) {
-  const response = await fetch(`/api/runs/${encodeURIComponent(runId)}/auto-detect-labels`, {
-    method: "POST",
-  });
-  const responsePayload = await readJsonResponse(response, `POST /api/runs/${runId}/auto-detect-labels`);
-  if (!response.ok) {
-    throw new Error(responsePayload.detail || "Failed to auto detect labels.");
-  }
-  return responsePayload;
-}
-
-function reloadOutputImage() {
-  if (!outputImage?.src) return;
-  const separator = outputImage.src.includes("?") ? "&" : "?";
-  const refreshedUrl = `${outputImage.src}${separator}labels=${Date.now()}`;
-  outputImage.src = refreshedUrl;
-  if (labelEditorImage) {
-    labelEditorImage.src = refreshedUrl;
-    labelEditorImage.addEventListener("load", renderLabelOverlayBoxes, { once: true });
-  }
-}
-
-function emptyManualLabels() {
-  return { version: "1.0", source: "manual", needs_manual_review: true, labels: [] };
-}
-
-function setManualLabelsStatus(message, isError) {
-  if (!manualLabelsStatus) return;
-  manualLabelsStatus.textContent = message;
-  manualLabelsStatus.classList.toggle("is-error", Boolean(isError));
-}
-
-document.querySelectorAll("[data-label-preset]").forEach((button) => {
-  button.addEventListener("click", () => {
-    if (manualLabelTextInput) {
-      manualLabelTextInput.value = button.dataset.labelPreset || "";
-    }
-  });
-});
-
-addLabelBoxBtn?.addEventListener("click", () => {
-  if (!labelEditorImage?.src) {
-    setManualLabelsStatus("Generate an output image before drawing labels.", true);
-    return;
-  }
-  labelDrawMode = true;
-  labelEditorOverlay?.classList.remove("is-idle");
-  setManualLabelsStatus("Drag on the output image to create a label box.", false);
-});
-
-labelEditorOverlay?.addEventListener("pointerdown", (event) => {
-  if (!labelDrawMode || !labelEditorImage?.naturalWidth) return;
-  const point = imagePointFromEvent(event);
-  labelDraft = {
-    start: point,
-    element: document.createElement("div"),
-  };
-  labelDraft.element.className = "label-editor-box is-draft";
-  labelEditorOverlay.appendChild(labelDraft.element);
-  labelEditorOverlay.setPointerCapture(event.pointerId);
-});
-
-labelEditorOverlay?.addEventListener("pointermove", (event) => {
-  if (!labelDraft) return;
-  updateDraftBox(labelDraft.start, imagePointFromEvent(event), labelDraft.element);
-});
-
-labelEditorOverlay?.addEventListener("pointerup", (event) => {
-  if (!labelDraft) return;
-  const end = imagePointFromEvent(event);
-  const bbox = bboxFromPoints(labelDraft.start, end);
-  labelDraft.element.remove();
-  labelDraft = null;
-  labelDrawMode = false;
-  labelEditorOverlay.classList.add("is-idle");
-
-  if (bbox[2] - bbox[0] < 8 || bbox[3] - bbox[1] < 8) {
-    setManualLabelsStatus("Label box is too small. Try drawing a larger rectangle.", true);
-    return;
-  }
-
-  const manualLabels = parseManualLabelsOrEmpty();
-  const text = (manualLabelTextInput?.value || "").trim();
-  manualLabels.labels.push({
-    id: `label_${Date.now()}`,
-    text,
-    bbox,
-    locked: false,
-    needs_text: !text,
-  });
-  manualLabels.source = "manual";
-  manualLabels.needs_manual_review = true;
-  manualLabelsJson.value = JSON.stringify(manualLabels, null, 2);
-  renderLabelOverlayBoxes();
-  setManualLabelsStatus("Label box added. Save labels before applying.", false);
-});
-
-function imagePointFromEvent(event) {
-  const rect = labelEditorImage.getBoundingClientRect();
-  const x = Math.max(0, Math.min(rect.width, event.clientX - rect.left));
-  const y = Math.max(0, Math.min(rect.height, event.clientY - rect.top));
-  return {
-    x: Math.round((x / rect.width) * labelEditorImage.naturalWidth),
-    y: Math.round((y / rect.height) * labelEditorImage.naturalHeight),
-  };
-}
-
-function bboxFromPoints(start, end) {
-  return [
-    Math.min(start.x, end.x),
-    Math.min(start.y, end.y),
-    Math.max(start.x, end.x),
-    Math.max(start.y, end.y),
-  ];
-}
-
-function updateDraftBox(start, end, element) {
-  const bbox = bboxFromPoints(start, end);
-  positionOverlayBox(element, bbox);
-}
-
-function renderLabelOverlayBoxes() {
-  if (!labelEditorOverlay || !labelEditorImage?.naturalWidth) return;
-  labelEditorOverlay.innerHTML = "";
-  const manualLabels = parseManualLabelsOrEmpty();
-  for (const label of manualLabels.labels || []) {
-    if (!Array.isArray(label.bbox) || label.bbox.length !== 4) continue;
-    const box = document.createElement("div");
-    box.className = "label-editor-box";
-    box.title = label.text || "Needs text";
-    positionOverlayBox(box, label.bbox);
-    labelEditorOverlay.appendChild(box);
-  }
-  if (!labelDrawMode) {
-    labelEditorOverlay.classList.add("is-idle");
-  }
-}
-
-function positionOverlayBox(element, bbox) {
-  const rect = labelEditorImage.getBoundingClientRect();
-  const scaleX = rect.width / labelEditorImage.naturalWidth;
-  const scaleY = rect.height / labelEditorImage.naturalHeight;
-  const [x0, y0, x1, y1] = bbox;
-  element.style.left = `${x0 * scaleX}px`;
-  element.style.top = `${y0 * scaleY}px`;
-  element.style.width = `${Math.max(1, (x1 - x0) * scaleX)}px`;
-  element.style.height = `${Math.max(1, (y1 - y0) * scaleY)}px`;
-}
-
-function parseManualLabelsOrEmpty() {
-  try {
-    const parsed = JSON.parse(manualLabelsJson?.value || "{}");
-    if (!Array.isArray(parsed.labels)) {
-      parsed.labels = [];
-    }
-    if (!parsed.version) parsed.version = "1.0";
-    if (!parsed.source) parsed.source = "manual";
-    return parsed;
-  } catch {
-    return emptyManualLabels();
-  }
+  return String(value).replace(/"/g, '\\"');
 }

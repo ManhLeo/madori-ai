@@ -1,0 +1,7 @@
+﻿{
+  "confirm_generation": true,
+  "provider": "openai",
+  "output_format": "png",
+  "use_reference_images": true,
+  "max_reference_images": 3
+}
