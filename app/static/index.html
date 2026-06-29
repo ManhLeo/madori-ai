@@ -262,6 +262,125 @@
                   <a class="result-url" id="outputUrlLink" href="#" target="_blank" rel="noreferrer" hidden></a>
                 </div>
               </div>
+              <section class="result-action-panel" id="visualQaPanel" hidden>
+                <div class="result-action-header">
+                  <div>
+                    <p class="eyebrow">Visual QA</p>
+                    <h3>Manual Review</h3>
+                  </div>
+                  <p class="result-action-status" id="visualQaStatusText">No active run.</p>
+                </div>
+                <div class="result-action-buttons">
+                  <button id="qaPassedBtn" class="secondary-button compact" type="button" disabled>
+                    Mark QA Passed
+                  </button>
+                  <button id="qaNeedsFixBtn" class="secondary-button compact" type="button" disabled>
+                    Mark Needs Fix
+                  </button>
+                  <button id="qaFailedBtn" class="secondary-button compact" type="button" disabled>
+                    Mark Failed
+                  </button>
+                  <button id="finalizeOutputBtn" class="download-button compact" type="button" disabled>
+                    Finalize Output
+                  </button>
+                </div>
+              </section>
+              <section class="result-action-panel" id="qaFeedbackPanel" hidden>
+                <div class="result-action-header">
+                  <div>
+                    <p class="eyebrow">Feedback for Regeneration</p>
+                    <h3>Correction Guidance</h3>
+                  </div>
+                  <p class="result-action-status" id="qaFeedbackStatusText">No active run.</p>
+                </div>
+                <div class="feedback-grid" id="qaFeedbackIssueGrid">
+                  <label class="feedback-option">
+                    <input type="checkbox" id="issueLayoutDrift" />
+                    <span>Layout drift</span>
+                  </label>
+                  <label class="feedback-option">
+                    <input type="checkbox" id="issueWrongRoomRole" />
+                    <span>Wrong room role</span>
+                  </label>
+                  <label class="feedback-option">
+                    <input type="checkbox" id="issueDiningWrongRoom" />
+                    <span>Dining table in wrong room</span>
+                  </label>
+                  <label class="feedback-option">
+                    <input type="checkbox" id="issueSofaTvWrongRoom" />
+                    <span>Sofa/TV in wrong room</span>
+                  </label>
+                  <label class="feedback-option">
+                    <input type="checkbox" id="issueWrongBedCount" />
+                    <span>Too many beds / wrong bed count</span>
+                  </label>
+                  <label class="feedback-option">
+                    <input type="checkbox" id="issueLabelsWrong" />
+                    <span>Labels wrong / missing English labels</span>
+                  </label>
+                  <label class="feedback-option">
+                    <input type="checkbox" id="issueFurnitureTooMuch" />
+                    <span>Furniture too much</span>
+                  </label>
+                  <label class="feedback-option">
+                    <input type="checkbox" id="issueFurnitureMissing" />
+                    <span>Furniture missing</span>
+                  </label>
+                  <label class="feedback-option">
+                    <input type="checkbox" id="issueStyleNotWatercolor" />
+                    <span>Style not watercolor</span>
+                  </label>
+                  <label class="feedback-option">
+                    <input type="checkbox" id="issuePaletteTooDark" />
+                    <span>Brighten overall palette</span>
+                  </label>
+                  <label class="feedback-option">
+                    <input type="checkbox" id="issueWallsTooDark" />
+                    <span>Walls too dark</span>
+                  </label>
+                  <label class="feedback-option">
+                    <input type="checkbox" id="issueWashingMachineWrongPosition" />
+                    <span>Washing machine wrong position</span>
+                  </label>
+                  <label class="feedback-option">
+                    <input type="checkbox" id="issueFurnitureOrientationWrong" />
+                    <span>Furniture orientation wrong</span>
+                  </label>
+                  <label class="feedback-option">
+                    <input type="checkbox" id="issueOther" />
+                    <span>Other</span>
+                  </label>
+                </div>
+                <label class="feedback-notes" for="qaFeedbackNotesInput">
+                  <span>Additional feedback</span>
+                  <textarea id="qaFeedbackNotesInput" rows="4" placeholder="Add manual feedback for the next regeneration attempt."></textarea>
+                </label>
+                <div class="result-action-buttons">
+                  <button id="saveQaFeedbackBtn" class="secondary-button compact" type="button" disabled>
+                    Save QA Feedback
+                  </button>
+                  <button id="regenerateWithFeedbackBtn" class="download-button compact" type="button" disabled>
+                    Regenerate with Feedback
+                  </button>
+                </div>
+                <p class="feedback-plan-summary" id="qaFeedbackPlanSummary" hidden></p>
+              </section>
+              <section class="result-card final-output-panel" id="finalOutputPanel" hidden>
+                <div class="result-card-header">
+                  <h3>Final Output</h3>
+                </div>
+                <img id="finalOutputImage" class="result-image" alt="Finalized floorplan output" hidden />
+                <a class="result-url" id="finalOutputUrlLink" href="#" target="_blank" rel="noreferrer" hidden></a>
+                <p class="result-meta" id="finalOutputStatusText">No final output yet.</p>
+              </section>
+              <section class="result-card final-output-panel" id="regeneratedOutputPanel" hidden>
+                <div class="result-card-header">
+                  <h3>Regenerated Output</h3>
+                </div>
+                <img id="regeneratedOutputImage" class="result-image" alt="Regenerated floorplan output" hidden />
+                <a class="result-url" id="regeneratedOutputUrlLink" href="#" target="_blank" rel="noreferrer" hidden></a>
+                <p class="result-meta" id="regeneratedOutputStatusText">No regenerated output yet.</p>
+              </section>
               <div class="quality-summary" id="qualitySummaryPanel" hidden>
                 <div class="quality-summary-header">
                   <h3>Production compliance</h3>

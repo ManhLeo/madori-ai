@@ -275,7 +275,7 @@ class LayoutCreationService:
             fixtures.append(
                 LayoutFixtureObject(
                     id=fixture.id,
-                    type=self._normalize_layout_room_type(fixture.type),
+                    type=self._normalize_layout_fixture_type(fixture.fixture_type or fixture.type),
                     bbox=self._bbox_from_any(fixture.bbox),
                     approx_bbox=self._bbox_from_any(fixture.approx_bbox),
                     polygon=fixture.polygon,
@@ -285,7 +285,11 @@ class LayoutCreationService:
                     confidence=fixture.confidence or 0.8,
                     geometry_confidence=fixture.geometry_confidence,
                     geometry_notes=list(fixture.geometry_notes or []),
-                    notes=[] if fixture.bbox or fixture.approx_bbox else ["No approximate bounding box available."],
+                    notes=(
+                        (["No approximate bounding box available."] if not (fixture.bbox or fixture.approx_bbox) else [])
+                        + ([f"source_label={fixture.source_label}"] if getattr(fixture, "source_label", None) else [])
+                        + (["required fixture anchor"] if getattr(fixture, "required", False) else [])
+                    ),
                 )
             )
         return fixtures
@@ -419,8 +423,10 @@ class LayoutCreationService:
 
         kitchen = room_lookup_by_role.get("kitchen") or (room_lookup_by_type.get("kitchen") or [None])[0]
         bath_room = room_lookup_by_role.get("bath_room") or (room_lookup_by_type.get("bath_room") or [None])[0] or (room_lookup_by_type.get("wash_area") or [None])[0]
+        wash_room = room_lookup_by_role.get("wash_room") or (room_lookup_by_type.get("wash_area") or [None])[0]
         dining_room = room_lookup_by_role.get("living_dining") or room_lookup_by_role.get("dining_zone") or (room_lookup_by_type.get("dining") or [None])[0] or living_room or kitchen
         media_lounge_room = room_lookup_by_role.get("media_lounge") or living_room
+        washing_machine_anchor = next((fixture for fixture in floorplan.fixtures if str(getattr(fixture, "fixture_type", fixture.type) or "") == "washing_machine_anchor"), None)
 
         signal_to_room_map = {
             "living_room": media_lounge_room,
@@ -521,6 +527,18 @@ class LayoutCreationService:
                 accent_colors=[],
                 confidence=0.58,
             )
+
+        if wash_room is not None or washing_machine_anchor is not None:
+            target_room = wash_room or bath_room
+            if target_room is not None:
+                add_suggestion(
+                    furniture_type="washing_machine",
+                    room=target_room,
+                    base_color="white",
+                    observed_color="white",
+                    accent_colors=[],
+                    confidence=0.72 if washing_machine_anchor is not None else 0.6,
+                )
 
         assignment_service = RoomFunctionAssignmentService(self.storage_dir, self.storage_runs_dir)
         cleaned_suggestions, cleanup_summary = assignment_service.apply_furniture_cleanup(suggestions, built_rooms, room_assignment)
@@ -709,6 +727,10 @@ class LayoutCreationService:
             "Furniture placement must stay inside the target room.",
             "Labels must use customer-approved English text.",
             "Human review is required before rendering.",
+            "Use a bright, airy palette with light warm neutrals.",
+            "Do not render walls, partitions, or wet-area blocks as heavy dark filled masses.",
+            "Place the washing machine only in the Wash Room at the Wash / 洗 mark.",
+            "Orient furniture naturally without changing the floorplan.",
         ]
         for constraint in floorplan.normalized_analysis.get("constraints") or []:
             if isinstance(constraint, str) and constraint not in constraints:
@@ -740,6 +762,13 @@ class LayoutCreationService:
             accent_colors=self._dedupe_keep_order(accent_colors),
             source="interior_analysis_validated",
             placement_status="suggested_unplaced",
+            orientation=self._default_orientation_for_furniture(furniture_type),
+            facing_to=self._default_facing_to_for_furniture(furniture_type),
+            orientation_rule=self._default_orientation_rule_for_furniture(furniture_type),
+            aligned_to=self._default_aligned_to_for_furniture(furniture_type),
+            headboard_against_wall=True if "bed" in furniture_type else None,
+            required_by_fixture_anchor=(furniture_type == "washing_machine"),
+            anchor_fixture_id="fixture_washing_machine_anchor_001" if furniture_type == "washing_machine" else None,
             locked=False,
             editable=True,
             confidence=max(0.0, min(1.0, confidence)),
@@ -762,6 +791,12 @@ class LayoutCreationService:
     def _normalize_layout_room_type(self, room_type: str | None) -> str:
         normalized = self._safe_string(room_type, default="unknown").lower().replace(" ", "_")
         return self.ROOM_TYPE_TO_LAYOUT_TYPE.get(normalized, normalized if normalized in self.APPROVED_LAYOUT_LABELS else "unknown")
+
+    def _normalize_layout_fixture_type(self, fixture_type: str | None) -> str:
+        normalized = self._safe_string(fixture_type, default="unknown").lower().replace(" ", "_")
+        if normalized == "washing_machine_anchor":
+            return "washing_machine_anchor"
+        return self._normalize_layout_room_type(normalized)
 
     def _layout_label_for_room(self, layout_type: str, fallback: str | None) -> str:
         return self.APPROVED_LAYOUT_LABELS.get(layout_type, fallback or "Unknown")
@@ -825,6 +860,7 @@ class LayoutCreationService:
             "bathtub": "bathtub",
             "shower": "shower",
             "towel": "towel",
+            "washing_machine": "washing_machine",
         }
         if not signal:
             return None
@@ -856,10 +892,61 @@ class LayoutCreationService:
             "bathtub": "bathtub",
             "shower": "shower",
             "towel": "towel",
+            "washing_machine": "washing_machine",
         }
         if not detected:
             return None
         return mapping.get(str(detected).strip().lower())
+
+    @staticmethod
+    def _default_orientation_for_furniture(furniture_type: str) -> str:
+        if furniture_type in {"tv", "tv_stand"}:
+            return "north"
+        if furniture_type.startswith("sofa"):
+            return "south"
+        if "bed" in furniture_type:
+            return "east"
+        if furniture_type == "washing_machine":
+            return "unknown"
+        return "unknown"
+
+    @staticmethod
+    def _default_facing_to_for_furniture(furniture_type: str) -> str:
+        if furniture_type.startswith("sofa"):
+            return "tv"
+        if furniture_type in {"tv", "tv_stand"}:
+            return "sofa"
+        if "bed" in furniture_type:
+            return "room_center"
+        if furniture_type == "washing_machine":
+            return "wall"
+        return "unknown"
+
+    @staticmethod
+    def _default_orientation_rule_for_furniture(furniture_type: str) -> str | None:
+        if furniture_type.startswith("sofa"):
+            return "face_tv_when_possible"
+        if furniture_type in {"tv", "tv_stand"}:
+            return "face_sofa_when_possible"
+        if furniture_type == "coffee_table":
+            return "between_sofa_and_tv_when_possible"
+        if "bed" in furniture_type:
+            return "align_to_wall_with_headboard"
+        if furniture_type in {"dining_table", "chair"}:
+            return "align_neatly_and_keep_circulation_clear"
+        if furniture_type == "washing_machine":
+            return "align_to_wash_anchor_or_wall"
+        return None
+
+    @staticmethod
+    def _default_aligned_to_for_furniture(furniture_type: str) -> str | None:
+        if furniture_type in {"dining_table", "chair"}:
+            return "room_axis"
+        if furniture_type == "washing_machine":
+            return "wash_anchor"
+        if "bed" in furniture_type:
+            return "wall"
+        return None
 
     def _observation_accent_colors(self, observation: dict) -> list[str]:
         if not isinstance(observation, dict):

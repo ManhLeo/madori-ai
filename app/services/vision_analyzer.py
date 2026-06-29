@@ -35,6 +35,28 @@ from app.schemas import (
 logger = logging.getLogger(__name__)
 
 
+class OpenAIJSONParseError(ValueError):
+    def __init__(
+        self,
+        message: str,
+        *,
+        response_text: str,
+        likely_truncated: bool = False,
+        attempts: list[dict] | None = None,
+        raw_payload: dict | None = None,
+        response_excerpt_limit: int = 500,
+    ) -> None:
+        super().__init__(message)
+        cleaned = response_text or ""
+        self.response_text = cleaned
+        self.response_length = len(cleaned)
+        self.first_500 = cleaned[:response_excerpt_limit]
+        self.last_500 = cleaned[-response_excerpt_limit:] if cleaned else ""
+        self.likely_truncated = likely_truncated
+        self.attempts = attempts or []
+        self.raw_payload = raw_payload or {}
+
+
 def _coerce_float(value):
     if value is None:
         return None
@@ -101,6 +123,85 @@ def _coerce_polygon(value) -> list[list[float]] | None:
             return None
         polygon.append([x_coord, y_coord])
     return polygon or None
+
+
+def _strip_json_fences(text: str) -> str:
+    cleaned = (text or "").strip()
+    if cleaned.startswith("```"):
+        cleaned = cleaned.strip("`").strip()
+        if cleaned.lower().startswith("json"):
+            cleaned = cleaned[4:].strip()
+    return cleaned
+
+
+def _extract_first_json_object(text: str) -> str | None:
+    start = text.find("{")
+    if start < 0:
+        return None
+
+    depth = 0
+    in_string = False
+    escaped = False
+    for index in range(start, len(text)):
+        char = text[index]
+        if in_string:
+            if escaped:
+                escaped = False
+                continue
+            if char == "\\":
+                escaped = True
+                continue
+            if char == '"':
+                in_string = False
+            continue
+        if char == '"':
+            in_string = True
+            continue
+        if char == "{":
+            depth += 1
+            continue
+        if char == "}":
+            depth -= 1
+            if depth == 0:
+                return text[start : index + 1]
+    return text[start:]
+
+
+def _looks_likely_truncated_json(text: str, error_message: str | None = None) -> bool:
+    cleaned = (text or "").rstrip()
+    error_text = (error_message or "").lower()
+    if not cleaned:
+        return True
+    if cleaned[-1] not in {"}", "]"}:
+        return True
+    if "unterminated string" in error_text:
+        return True
+    if "expecting value" in error_text and len(cleaned) < 200:
+        return True
+    if "expecting ',' delimiter" in error_text and len(cleaned) < 200:
+        return True
+    return False
+
+
+def parse_openai_json_response(text: str) -> dict:
+    cleaned = _strip_json_fences(text)
+    candidate = _extract_first_json_object(cleaned) or cleaned
+    try:
+        parsed = json.loads(candidate)
+    except json.JSONDecodeError as exc:
+        raise OpenAIJSONParseError(
+            f"OpenAI returned invalid JSON: {exc}",
+            response_text=cleaned,
+            likely_truncated=_looks_likely_truncated_json(cleaned, str(exc)),
+        ) from exc
+
+    if not isinstance(parsed, dict):
+        raise OpenAIJSONParseError(
+            "OpenAI returned JSON that was not an object.",
+            response_text=cleaned,
+            likely_truncated=_looks_likely_truncated_json(cleaned),
+        )
+    return parsed
 
 
 class VisionAnalyzer:
@@ -280,11 +381,21 @@ class VisionAnalyzer:
 
         return self._analyze_interior_style_stub_with_raw(interior_images, style_reference_images)
 
-    def analyze_floorplan_semantic_with_raw(self, image_path: Path) -> tuple[FloorplanAnalysis, dict]:
+    def analyze_floorplan_semantic_with_raw(
+        self,
+        image_path: Path,
+        *,
+        run_id: str | None = None,
+        artifacts_dir: Path | None = None,
+    ) -> tuple[FloorplanAnalysis, dict]:
         settings = get_settings()
         provider = self._vision_provider()
         if provider == "openai":
-            return self._analyze_floorplan_openai_semantic_with_raw(image_path)
+            return self._analyze_floorplan_openai_semantic_with_raw(
+                image_path,
+                run_id=run_id,
+                artifacts_dir=artifacts_dir,
+            )
         if provider == "gemini":
             return self._analyze_floorplan_gemini_semantic_with_raw(image_path)
         if provider != "stub":
@@ -421,44 +532,168 @@ class VisionAnalyzer:
             raise HTTPException(status_code=500, detail=f"openai SDK is not available: {exc}") from exc
         return OpenAI(api_key=settings.openai_api_key, timeout=settings.openai_analysis_timeout_seconds)
 
-    def _analyze_floorplan_openai_semantic_with_raw(self, image_path: Path) -> tuple[FloorplanAnalysis, dict]:
+    def _analyze_floorplan_openai_semantic_with_raw(
+        self,
+        image_path: Path,
+        *,
+        run_id: str | None = None,
+        artifacts_dir: Path | None = None,
+    ) -> tuple[FloorplanAnalysis, dict]:
         settings = get_settings()
         if not image_path.exists():
             raise HTTPException(status_code=404, detail="floorplan image not found")
         client = self._require_openai_analysis_client()
         started = time.monotonic()
         prompt = self._openai_floorplan_semantic_prompt()
-        response_text, parse_mode = self._generate_openai_json_text(
-            client=client,
-            model=settings.openai_analysis_model,
-            prompt=prompt,
-            image_paths=[image_path],
-            failure_detail="OpenAI floorplan semantic analysis failed",
-        )
-        try:
-            parsed = self._load_json_payload(response_text, "OpenAI floorplan semantic analysis")
-            normalized_payload = self._coerce_openai_floorplan_payload(parsed)
-            analysis = FloorplanAnalysis.model_validate(self._coerce_floorplan_payload(normalized_payload))
-        except HTTPException:
-            raise
-        except Exception as exc:
-            raise HTTPException(status_code=502, detail=f"OpenAI returned invalid floorplan JSON: {exc}") from exc
-        normalized = self.normalize_floorplan_analysis(analysis)
-        raw_payload = {
-            "provider": "openai",
-            "model": settings.openai_analysis_model,
-            "mode": "semantic_only",
-            "analysis_type": "floorplan_semantic",
-            "geometry_precision": "approximate_semantic_only",
-            "parse_mode": parse_mode,
-            "response_text": response_text,
-            "parsed_response": parsed,
-            "analysis": normalized.model_dump(mode="json"),
-            "duration_seconds": round(time.monotonic() - started, 3),
-            "warnings": parsed.get("warnings", []) if isinstance(parsed, dict) else [],
-            "errors": parsed.get("errors", []) if isinstance(parsed, dict) else [],
-        }
-        return normalized, raw_payload
+        attempts: list[dict] = []
+        response_text = ""
+        parsed: dict | None = None
+        parse_mode = "responses_output_text"
+        retry_attempts = max(1, int(settings.openai_analysis_json_retry_attempts))
+
+        for attempt in range(1, retry_attempts + 1):
+            attempt_prompt = prompt if attempt == 1 else self._openai_floorplan_semantic_retry_prompt(attempt, attempts[-1] if attempts else None)
+            response_text, parse_mode = self._generate_openai_json_text(
+                client=client,
+                model=settings.openai_analysis_model,
+                prompt=attempt_prompt,
+                image_paths=[image_path],
+                failure_detail="OpenAI floorplan semantic analysis failed",
+                response_text_format=self._openai_floorplan_semantic_response_format(),
+            )
+            try:
+                parsed = parse_openai_json_response(response_text)
+                normalized_payload = self._coerce_openai_floorplan_payload(parsed)
+                analysis = FloorplanAnalysis.model_validate(self._coerce_floorplan_payload(normalized_payload))
+            except OpenAIJSONParseError as exc:
+                failed_path = self._write_failed_openai_response(
+                    run_id=run_id,
+                    artifacts_dir=artifacts_dir,
+                    attempt=attempt,
+                    response_text=exc.response_text,
+                )
+                attempts.append(
+                    {
+                        "attempt": attempt,
+                        "parse_status": "failed",
+                        "error": str(exc),
+                        "response_length": exc.response_length,
+                        "likely_truncated": exc.likely_truncated,
+                        "raw_response_path": failed_path,
+                    }
+                )
+                if attempt < retry_attempts:
+                    continue
+                failure_payload = {
+                    "run_id": run_id,
+                    "provider": "openai",
+                    "model": settings.openai_analysis_model,
+                    "mode": "semantic_only",
+                    "analysis_type": "floorplan_semantic",
+                    "geometry_precision": "approximate_semantic_only",
+                    "parse_mode": parse_mode,
+                    "attempts": attempts,
+                    "duration_seconds": round(time.monotonic() - started, 3),
+                    "warnings": [
+                        "OpenAI floorplan semantic analysis returned invalid JSON after retry.",
+                    ],
+                    "errors": [
+                        {
+                            "error": "openai_invalid_json",
+                            "message": "OpenAI floorplan semantic analysis returned invalid JSON after retry.",
+                            "details": {
+                                "attempts": len(attempts),
+                                "likely_truncated": any(item.get("likely_truncated") for item in attempts),
+                            },
+                        }
+                    ],
+                }
+                raise OpenAIJSONParseError(
+                    "OpenAI floorplan semantic analysis returned invalid JSON after retry.",
+                    response_text=exc.response_text,
+                    likely_truncated=any(item.get("likely_truncated") for item in attempts),
+                    attempts=attempts,
+                    raw_payload=failure_payload,
+                ) from exc
+            except HTTPException:
+                raise
+            except Exception as exc:
+                failed_path = self._write_failed_openai_response(
+                    run_id=run_id,
+                    artifacts_dir=artifacts_dir,
+                    attempt=attempt,
+                    response_text=response_text,
+                )
+                attempts.append(
+                    {
+                        "attempt": attempt,
+                        "parse_status": "failed",
+                        "error": str(exc),
+                        "response_length": len(response_text or ""),
+                        "likely_truncated": _looks_likely_truncated_json(response_text, str(exc)),
+                        "raw_response_path": failed_path,
+                    }
+                )
+                if attempt < retry_attempts:
+                    continue
+                failure_payload = {
+                    "run_id": run_id,
+                    "provider": "openai",
+                    "model": settings.openai_analysis_model,
+                    "mode": "semantic_only",
+                    "analysis_type": "floorplan_semantic",
+                    "geometry_precision": "approximate_semantic_only",
+                    "parse_mode": parse_mode,
+                    "attempts": attempts,
+                    "duration_seconds": round(time.monotonic() - started, 3),
+                    "warnings": [
+                        "OpenAI floorplan semantic analysis returned invalid JSON after retry.",
+                    ],
+                    "errors": [
+                        {
+                            "error": "openai_invalid_json",
+                            "message": "OpenAI floorplan semantic analysis returned invalid JSON after retry.",
+                            "details": {
+                                "attempts": len(attempts),
+                                "likely_truncated": any(item.get("likely_truncated") for item in attempts),
+                            },
+                        }
+                    ],
+                }
+                raise OpenAIJSONParseError(
+                    "OpenAI floorplan semantic analysis returned invalid JSON after retry.",
+                    response_text=response_text,
+                    likely_truncated=any(item.get("likely_truncated") for item in attempts),
+                    attempts=attempts,
+                    raw_payload=failure_payload,
+                ) from exc
+            else:
+                attempts.append(
+                    {
+                        "attempt": attempt,
+                        "parse_status": "passed",
+                        "response_length": len(response_text or ""),
+                        "likely_truncated": False,
+                    }
+                )
+                normalized = self.normalize_floorplan_analysis(analysis)
+                raw_payload = {
+                    "run_id": run_id,
+                    "provider": "openai",
+                    "model": settings.openai_analysis_model,
+                    "mode": "semantic_only",
+                    "analysis_type": "floorplan_semantic",
+                    "geometry_precision": "approximate_semantic_only",
+                    "parse_mode": parse_mode,
+                    "attempts": attempts,
+                    "response_text": response_text,
+                    "parsed_response": parsed,
+                    "analysis": normalized.model_dump(mode="json"),
+                    "duration_seconds": round(time.monotonic() - started, 3),
+                    "warnings": parsed.get("warnings", []) if isinstance(parsed, dict) else [],
+                    "errors": parsed.get("errors", []) if isinstance(parsed, dict) else [],
+                }
+                return normalized, raw_payload
 
     def _analyze_interior_style_openai_with_raw(
         self,
@@ -927,6 +1162,7 @@ class VisionAnalyzer:
         prompt: str,
         image_paths: list[Path],
         failure_detail: str,
+        response_text_format: dict | None = None,
     ) -> tuple[str, str]:
         settings = get_settings()
         content: list[dict] = [{"type": "input_text", "text": prompt}]
@@ -935,15 +1171,27 @@ class VisionAnalyzer:
             image_bytes = image_path.read_bytes()
             encoded = base64.b64encode(image_bytes).decode("ascii")
             content.append({"type": "input_image", "image_url": f"data:{mime_type};base64,{encoded}"})
+        response_kwargs = {
+            "model": model,
+            "input": [{"role": "user", "content": content}],
+            "max_output_tokens": settings.openai_analysis_max_output_tokens,
+        }
+        if response_text_format is not None:
+            response_kwargs["text"] = {"format": response_text_format, "verbosity": "low"}
         try:
-            response = client.responses.create(
-                model=model,
-                input=[{"role": "user", "content": content}],
-                max_output_tokens=settings.openai_analysis_max_output_tokens,
-            )
+            response = client.responses.create(**response_kwargs)
         except Exception as exc:
-            short_error = self._short_retryable_error(exc)
-            raise HTTPException(status_code=502, detail=f"{failure_detail}: {short_error}") from exc
+            if response_text_format is not None:
+                fallback_kwargs = dict(response_kwargs)
+                fallback_kwargs.pop("text", None)
+                try:
+                    response = client.responses.create(**fallback_kwargs)
+                except Exception as fallback_exc:
+                    short_error = self._short_retryable_error(fallback_exc)
+                    raise HTTPException(status_code=502, detail=f"{failure_detail}: {short_error}") from fallback_exc
+            else:
+                short_error = self._short_retryable_error(exc)
+                raise HTTPException(status_code=502, detail=f"{failure_detail}: {short_error}") from exc
 
         text = getattr(response, "output_text", None)
         if isinstance(text, str) and text.strip():
@@ -963,17 +1211,218 @@ class VisionAnalyzer:
 
         raise HTTPException(status_code=502, detail=f"{failure_detail}: empty response text")
 
+    @staticmethod
+    def _write_failed_openai_response(
+        run_id: str | None,
+        artifacts_dir: Path | None,
+        *,
+        attempt: int,
+        response_text: str,
+    ) -> str | None:
+        if run_id is None or artifacts_dir is None:
+            return None
+        artifacts_dir.mkdir(parents=True, exist_ok=True)
+        failed_path = artifacts_dir / f"floorplan_analysis_raw_failed_attempt_{attempt}.txt"
+        try:
+            failed_path.write_text(response_text or "", encoding="utf-8")
+        except OSError:
+            return None
+        return str(failed_path)
+
+    @staticmethod
+    def _openai_floorplan_semantic_response_format() -> dict:
+        return {
+            "type": "json_schema",
+            "name": "floorplan_semantic_compact",
+            "strict": True,
+            "description": "Compact JSON for floorplan semantic analysis.",
+            "schema": {
+                "type": "object",
+                "additionalProperties": False,
+                "required": [
+                    "schema_version",
+                    "provider",
+                    "model",
+                    "analysis_type",
+                    "geometry_precision",
+                    "canvas",
+                    "apartment_type",
+                    "layout_description",
+                    "rooms",
+                    "doors",
+                    "windows",
+                    "fixtures",
+                    "labels",
+                    "warnings",
+                    "errors",
+                ],
+                "properties": {
+                    "schema_version": {"type": "string"},
+                    "provider": {"type": "string"},
+                    "model": {"type": ["string", "null"]},
+                    "analysis_type": {"type": "string"},
+                    "geometry_precision": {"type": "string"},
+                    "canvas": {
+                        "type": "object",
+                        "additionalProperties": False,
+                        "required": ["width", "height"],
+                        "properties": {
+                            "width": {"type": "integer"},
+                            "height": {"type": "integer"},
+                        },
+                    },
+                    "apartment_type": {"type": ["string", "null"]},
+                    "layout_description": {"type": "string"},
+                    "rooms": {
+                        "type": "array",
+                        "maxItems": 24,
+                        "items": {
+                            "type": "object",
+                            "additionalProperties": False,
+                            "required": [
+                                "id",
+                                "source_label",
+                                "label_english",
+                                "room_type",
+                                "functional_hint",
+                                "bbox",
+                                "confidence",
+                            ],
+                            "properties": {
+                                "id": {"type": "string"},
+                                "source_label": {"type": ["string", "null"]},
+                                "label_english": {"type": ["string", "null"]},
+                                "room_type": {"type": "string"},
+                                "functional_hint": {"type": ["string", "null"]},
+                                "bbox": {
+                                    "type": ["array", "null"],
+                                    "minItems": 4,
+                                    "maxItems": 4,
+                                    "items": {"type": "integer"},
+                                },
+                                "confidence": {"type": "number"},
+                            },
+                        },
+                    },
+                    "doors": {
+                        "type": "array",
+                        "maxItems": 24,
+                        "items": {
+                            "type": "object",
+                            "additionalProperties": False,
+                            "required": ["position", "connects", "bbox", "confidence"],
+                            "properties": {
+                                "position": {"type": ["string", "null"]},
+                                "connects": {"type": "array", "items": {"type": "string"}},
+                                "bbox": {
+                                    "type": ["array", "null"],
+                                    "minItems": 4,
+                                    "maxItems": 4,
+                                    "items": {"type": "integer"},
+                                },
+                                "confidence": {"type": "number"},
+                            },
+                        },
+                    },
+                    "windows": {
+                        "type": "array",
+                        "maxItems": 24,
+                        "items": {
+                            "type": "object",
+                            "additionalProperties": False,
+                            "required": ["position", "room", "bbox", "confidence"],
+                            "properties": {
+                                "position": {"type": ["string", "null"]},
+                                "room": {"type": ["string", "null"]},
+                                "bbox": {
+                                    "type": ["array", "null"],
+                                    "minItems": 4,
+                                    "maxItems": 4,
+                                    "items": {"type": "integer"},
+                                },
+                                "confidence": {"type": "number"},
+                            },
+                        },
+                    },
+                    "fixtures": {
+                        "type": "array",
+                        "maxItems": 24,
+                        "items": {
+                            "type": "object",
+                            "additionalProperties": False,
+                            "required": ["id", "type", "room_type", "bbox", "confidence"],
+                            "properties": {
+                                "id": {"type": "string"},
+                                "type": {"type": "string"},
+                                "room_type": {"type": ["string", "null"]},
+                                "bbox": {
+                                    "type": ["array", "null"],
+                                    "minItems": 4,
+                                    "maxItems": 4,
+                                    "items": {"type": "integer"},
+                                },
+                                "confidence": {"type": "number"},
+                            },
+                        },
+                    },
+                    "labels": {
+                        "type": "array",
+                        "maxItems": 32,
+                        "items": {
+                            "type": "object",
+                            "additionalProperties": False,
+                            "required": ["text", "english", "bbox"],
+                            "properties": {
+                                "text": {"type": ["string", "null"]},
+                                "english": {"type": ["string", "null"]},
+                                "bbox": {
+                                    "type": ["array", "null"],
+                                    "minItems": 4,
+                                    "maxItems": 4,
+                                    "items": {"type": "integer"},
+                                },
+                            },
+                        },
+                    },
+                    "warnings": {"type": "array", "maxItems": 20, "items": {"type": "string"}},
+                    "errors": {"type": "array", "maxItems": 20, "items": {"type": "string"}},
+                },
+            },
+        }
+
     def _openai_floorplan_semantic_prompt(self) -> str:
         return (
             "Analyze this Japanese apartment floorplan for semantic understanding only. Do not generate images.\n"
-            "Return strict JSON only, no markdown.\n"
-            "Do not treat geometry as CAD-accurate. Any bbox must be approximate_semantic_only.\n"
-            "Identify rooms, Japanese labels, English labels, rough positions, approximate bboxes if visible, fixtures, doors, windows, balcony, warnings, and confidence.\n"
-            "Allowed English labels: Living Room, Bed Room, Kitchen, Dining Kitchen, Bath Room, Toilet, Wash Room, Closet, Entrance, Balcony, Hallway, Storage, Western Room, Unknown.\n"
-            "Use room_type values compatible with these labels, lowercase snake_case when possible.\n"
-            "If multiple 洋室 rooms exist, use context; one may be Bed Room and another Western Room. If uncertain use western_room and add a warning.\n"
-            "Return JSON with keys: schema_version, provider, model, analysis_type, geometry_precision, canvas, rooms, fixtures, doors, windows, labels, dimensions, warnings, errors.\n"
-            "Room objects should include id, room_type, label_original, label_english, position, approx_bbox, confidence, geometry_confidence, geometry_notes.\n"
+            "Return only valid JSON. No markdown. No comments. No trailing commas. No explanation text before or after JSON.\n"
+            "Use double quotes for all JSON strings.\n"
+            "If uncertain, use null or \"unknown\".\n"
+            "Keep all string values short.\n"
+            "Use these top-level keys only: schema_version, provider, model, analysis_type, geometry_precision, canvas, apartment_type, layout_description, rooms, doors, windows, fixtures, labels, warnings, errors.\n"
+            "Do not include long reasoning, long notes, or repeated descriptions.\n"
+            "For each room, return only: id, source_label, label_english, room_type, functional_hint, bbox, confidence.\n"
+            "For each label, return only: text, english, bbox.\n"
+            "For each door or window, keep fields short and compact.\n"
+            "Use empty arrays when labels or fixtures are not clearly needed.\n"
+            "Use room_type values like living_room, bed_room, kitchen, dining_kitchen, bath_room, toilet, wash_room, closet, entrance, balcony, hallway, storage, western_room, unknown.\n"
+            "Use short functional_hint values such as main_living, western_lounge, bedroom, kitchen, bath, toilet, wash, closet, circulation, balcony, unknown.\n"
+            "Any bbox must be approximate semantic guidance only and use [x, y, w, h] or null.\n"
+            "If multiple 洋室 rooms exist, use context; one may be bed_room and another western_room. If uncertain use western_room and add a warning.\n"
+            "Keep warnings and errors as short strings.\n"
+        )
+
+    def _openai_floorplan_semantic_retry_prompt(self, attempt: int, previous_attempt: dict | None = None) -> str:
+        if previous_attempt and previous_attempt.get("likely_truncated"):
+            extra = "The previous response was likely truncated. Return a much shorter JSON object."
+        else:
+            extra = "The previous response was invalid JSON. Return a shorter valid JSON object only."
+        return (
+            f"{extra}\n"
+            "Return only compact JSON.\n"
+            "No markdown. No explanations.\n"
+            "Keep strings short.\n"
+            "Use null or \"unknown\" when unsure.\n"
+            "Do not add extra keys.\n"
+            "Preserve the same top-level structure and key names.\n"
         )
 
     def _openai_interior_semantic_prompt(self, source_metadata: dict) -> str:
@@ -993,41 +1442,155 @@ class VisionAnalyzer:
     def _coerce_openai_floorplan_payload(self, payload: dict) -> dict:
         if not isinstance(payload, dict):
             raise TypeError("OpenAI floorplan response must be a JSON object")
+
+        def coerce_compact_bbox(value):
+            if value is None:
+                return None
+            if isinstance(value, str):
+                try:
+                    value = json.loads(value)
+                except Exception:
+                    return None
+            if isinstance(value, dict):
+                if any(key in value for key in ("x", "y", "w", "h")):
+                    x = _coerce_float(value.get("x"))
+                    y = _coerce_float(value.get("y"))
+                    w = _coerce_float(value.get("w"))
+                    h = _coerce_float(value.get("h"))
+                    if None in {x, y, w, h}:
+                        return None
+                    return {
+                        "x_min": x,
+                        "y_min": y,
+                        "x_max": x + w,
+                        "y_max": y + h,
+                    }
+                if any(key in value for key in ("x_min", "y_min", "x_max", "y_max", "left", "top", "right", "bottom")):
+                    x_min = _coerce_float(value.get("x_min", value.get("left")))
+                    y_min = _coerce_float(value.get("y_min", value.get("top")))
+                    x_max = _coerce_float(value.get("x_max", value.get("right")))
+                    y_max = _coerce_float(value.get("y_max", value.get("bottom")))
+                    if None in {x_min, y_min, x_max, y_max}:
+                        return None
+                    return {
+                        "x_min": x_min,
+                        "y_min": y_min,
+                        "x_max": x_max,
+                        "y_max": y_max,
+                    }
+            if isinstance(value, (list, tuple)) and len(value) >= 4:
+                x = _coerce_float(value[0])
+                y = _coerce_float(value[1])
+                w = _coerce_float(value[2])
+                h = _coerce_float(value[3])
+                if None in {x, y, w, h}:
+                    return None
+                return {
+                    "x_min": x,
+                    "y_min": y,
+                    "x_max": x + w,
+                    "y_max": y + h,
+                }
+            return None
+
         warnings = self._coerce_text_list(payload.get("warnings"))
+        errors = self._coerce_text_list(payload.get("errors"))
         if payload.get("geometry_precision") != "approximate_semantic_only":
             warnings.append("OpenAI geometry is approximate semantic-only and not CAD-accurate.")
 
         rooms = []
-        for room in payload.get("rooms") or []:
+        for index, room in enumerate(payload.get("rooms") or [], start=1):
             if not isinstance(room, dict):
                 continue
-            geometry_notes = self._coerce_text_list(room.get("geometry_notes"))
+            source_label = room.get("source_label") or room.get("label_original") or room.get("label") or room.get("name")
+            label_english = room.get("label_english") or room.get("english") or room.get("label_en")
+            room_type = room.get("room_type") or room.get("type") or label_english or source_label or "unknown"
+            functional_hint = room.get("functional_hint") or room.get("position") or "unknown"
+            bbox = coerce_compact_bbox(room.get("bbox") or room.get("approx_bbox") or room.get("bounding_box"))
+            geometry_notes = self._coerce_text_list(room.get("geometry_notes") or room.get("notes"))
             if not geometry_notes:
                 geometry_notes = ["Approximate semantic bbox only; not CAD-accurate."]
             rooms.append(
                 {
-                    "type": room.get("room_type") or room.get("type") or room.get("label_english") or "unknown",
-                    "room_name": room.get("label_original") or room.get("label_english") or room.get("name"),
-                    "position": room.get("position"),
+                    "type": room_type,
+                    "room_name": source_label or label_english or room_type,
+                    "position": functional_hint,
                     "size": room.get("size"),
-                    "approx_bbox": room.get("approx_bbox") or room.get("bbox") or room.get("bounding_box"),
-                    "bounding_box": room.get("approx_bbox") or room.get("bbox") or room.get("bounding_box"),
+                    "approx_bbox": bbox,
+                    "bounding_box": bbox,
                     "confidence": room.get("confidence"),
                     "geometry_confidence": min(_coerce_float(room.get("geometry_confidence")) or 0.3, 0.3),
                     "geometry_notes": geometry_notes,
-                    "connected_to": room.get("connected_to") or [],
+                    "connected_to": self._coerce_text_list(
+                        room.get("connected_to") or room.get("connections") or room.get("adjacent_rooms")
+                    ),
                 }
             )
+
+        doors = []
+        for door in payload.get("doors") or []:
+            if not isinstance(door, dict):
+                continue
+            connects = self._coerce_text_list(
+                door.get("connects") or door.get("connected_rooms") or door.get("rooms") or door.get("labels")
+            )
+            doors.append(
+                {
+                    "position": door.get("position") or door.get("direction") or door.get("location"),
+                    "connects": connects,
+                    "bounding_box": coerce_compact_bbox(door.get("bbox") or door.get("approx_bbox") or door.get("bounding_box")),
+                    "approx_bbox": coerce_compact_bbox(door.get("bbox") or door.get("approx_bbox") or door.get("bounding_box")),
+                    "confidence": door.get("confidence"),
+                    "geometry_confidence": min(_coerce_float(door.get("geometry_confidence")) or 0.3, 0.3),
+                    "geometry_notes": self._coerce_text_list(door.get("geometry_notes") or door.get("notes")),
+                }
+            )
+
+        windows = []
+        for window in payload.get("windows") or []:
+            if not isinstance(window, dict):
+                continue
+            windows.append(
+                {
+                    "position": window.get("position") or window.get("direction") or window.get("location"),
+                    "room": window.get("room") or window.get("room_type") or window.get("room_id"),
+                    "bounding_box": coerce_compact_bbox(window.get("bbox") or window.get("approx_bbox") or window.get("bounding_box")),
+                    "approx_bbox": coerce_compact_bbox(window.get("bbox") or window.get("approx_bbox") or window.get("bounding_box")),
+                    "confidence": window.get("confidence"),
+                    "geometry_confidence": min(_coerce_float(window.get("geometry_confidence")) or 0.3, 0.3),
+                    "geometry_notes": self._coerce_text_list(window.get("geometry_notes") or window.get("notes")),
+                }
+            )
+
+        labels = []
+        for index, label in enumerate(payload.get("labels") or [], start=1):
+            if not isinstance(label, dict):
+                continue
+            bbox = coerce_compact_bbox(label.get("bbox") or label.get("approx_bbox") or label.get("bounding_box"))
+            labels.append(
+                {
+                    "id": f"label_{index:03d}",
+                    "text": label.get("text") or label.get("source_text") or label.get("label_original"),
+                    "english": label.get("english") or label.get("approved_text") or label.get("label_english"),
+                    "bbox": bbox,
+                }
+            )
+
         return {
-            "apartment_type": payload.get("apartment_type"),
-            "layout_description": payload.get("layout_description") or "OpenAI semantic floorplan analysis; geometry is approximate only.",
+            "apartment_type": payload.get("apartment_type") or payload.get("apartmentType") or "unknown",
+            "layout_description": payload.get("layout_description")
+            or payload.get("summary")
+            or "OpenAI semantic floorplan analysis; geometry is approximate only.",
             "rooms": rooms,
-            "doors": payload.get("doors") or [],
-            "windows": payload.get("windows") or [],
+            "doors": doors,
+            "windows": windows,
             "balcony": self._coerce_openai_balcony(payload),
             "constraints": self._dedupe_preserve_order(
                 warnings + ["OpenAI bbox/geometry signals are approximate semantic-only and not CAD-accurate."]
             ),
+            "labels": labels,
+            "warnings": warnings,
+            "errors": errors,
         }
 
     def _coerce_openai_balcony(self, payload: dict):

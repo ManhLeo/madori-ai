@@ -32,6 +32,76 @@ const outputImage = document.querySelector("#outputImage");
 const downloadOutputBtn = document.querySelector("#downloadOutputBtn");
 const runIdText = document.querySelector("#runIdText");
 const outputUrlLink = document.querySelector("#outputUrlLink");
+const visualQaPanel = document.querySelector("#visualQaPanel");
+const visualQaStatusText = document.querySelector("#visualQaStatusText");
+const qaPassedBtn = document.querySelector("#qaPassedBtn");
+const qaNeedsFixBtn = document.querySelector("#qaNeedsFixBtn");
+const qaFailedBtn = document.querySelector("#qaFailedBtn");
+const finalizeOutputBtn = document.querySelector("#finalizeOutputBtn");
+const qaFeedbackPanel = document.querySelector("#qaFeedbackPanel");
+const qaFeedbackStatusText = document.querySelector("#qaFeedbackStatusText");
+const saveQaFeedbackBtn = document.querySelector("#saveQaFeedbackBtn");
+const regenerateWithFeedbackBtn = document.querySelector("#regenerateWithFeedbackBtn");
+const qaFeedbackNotesInput = document.querySelector("#qaFeedbackNotesInput");
+const qaFeedbackPlanSummary = document.querySelector("#qaFeedbackPlanSummary");
+const regeneratedOutputPanel = document.querySelector("#regeneratedOutputPanel");
+const regeneratedOutputImage = document.querySelector("#regeneratedOutputImage");
+const regeneratedOutputUrlLink = document.querySelector("#regeneratedOutputUrlLink");
+const regeneratedOutputStatusText = document.querySelector("#regeneratedOutputStatusText");
+const finalOutputPanel = document.querySelector("#finalOutputPanel");
+const finalOutputImage = document.querySelector("#finalOutputImage");
+const finalOutputUrlLink = document.querySelector("#finalOutputUrlLink");
+const finalOutputStatusText = document.querySelector("#finalOutputStatusText");
+
+function byId(id) {
+  return document.getElementById(id);
+}
+
+function setText(id, value) {
+  const el = byId(id);
+  if (el) el.textContent = value ?? "";
+}
+
+function setHtml(id, value) {
+  const el = byId(id);
+  if (el) el.innerHTML = value ?? "";
+}
+
+function setDisplay(id, displayValue) {
+  const el = byId(id);
+  if (el) el.style.display = displayValue;
+}
+
+function setSrc(id, value) {
+  const el = byId(id);
+  if (el) el.src = value ?? "";
+}
+
+function setHidden(id, hidden) {
+  const el = byId(id);
+  if (el) el.hidden = Boolean(hidden);
+}
+
+function setHref(id, value) {
+  const el = byId(id);
+  if (el) {
+    if (value) {
+      el.href = value;
+    } else {
+      el.removeAttribute("href");
+    }
+  }
+}
+
+function setDisabled(id, disabled) {
+  const el = byId(id);
+  if (el) el.disabled = Boolean(disabled);
+}
+
+function setValue(id, value) {
+  const el = byId(id);
+  if (el) el.value = value ?? "";
+}
 
 const PIPELINE_STEPS = [
   ["Inspecting input", "inspect"],
@@ -52,12 +122,22 @@ const PIPELINE_STEPS = [
 let currentInputPreviewUrl = null;
 let currentOutputUrl = "";
 let currentRunId = "";
+let currentFinalOutputUrl = "";
 let selectedFloorplanPreviewUrl = null;
 let selectedInteriorPreviewUrls = [];
+let visualQaRequestInFlight = false;
+let finalizeRequestInFlight = false;
+let qaFeedbackRequestInFlight = false;
+let regenerateRequestInFlight = false;
+let qaFeedbackSavedForRunId = "";
+let latestRegenerationResult = null;
 
 initializeProgressList();
 renderSelectedFloorplanPreview(null);
 renderSelectedInteriorPreviews([]);
+syncPostResultControls();
+clearFinalOutputResult();
+clearRegeneratedOutputResult();
 
 floorplanInput?.addEventListener("change", () => {
   const file = floorplanInput.files?.[0];
@@ -79,6 +159,30 @@ interiorPhotosInput?.addEventListener("change", () => {
     : "No interior photos selected. Interior photos are optional.";
   clearBackendAssetPreviews();
   renderSelectedInteriorPreviews(files);
+});
+
+qaPassedBtn?.addEventListener("click", () => {
+  void submitVisualQa("passed");
+});
+
+qaNeedsFixBtn?.addEventListener("click", () => {
+  void submitVisualQa("needs_fix");
+});
+
+qaFailedBtn?.addEventListener("click", () => {
+  void submitVisualQa("failed");
+});
+
+finalizeOutputBtn?.addEventListener("click", () => {
+  void finalizeCurrentRunOutput();
+});
+
+saveQaFeedbackBtn?.addEventListener("click", () => {
+  void submitQaFeedback();
+});
+
+regenerateWithFeedbackBtn?.addEventListener("click", () => {
+  void regenerateWithFeedback();
 });
 
 form?.addEventListener("submit", async (event) => {
@@ -249,22 +353,38 @@ function fallbackDraftUrl(runId) {
 
 function renderDraftResult(runId, imageUrl) {
   currentRunId = runId;
-  currentOutputUrl = imageUrl;
+  const resolvedImageUrl = resolveAssetUrl(imageUrl);
+  currentOutputUrl = resolvedImageUrl;
 
-  outputImage.src = imageUrl;
+  outputImage.src = resolvedImageUrl;
   outputImage.hidden = false;
   outputImage.onerror = () => {
-    const fallbackUrl = fallbackDraftUrl(runId);
+    const fallbackUrl = resolveAssetUrl(fallbackDraftUrl(runId));
     if (outputImage.src.endsWith(fallbackUrl)) return;
     currentOutputUrl = fallbackUrl;
     outputImage.src = fallbackUrl;
     renderOutputUrl(fallbackUrl);
   };
 
-  renderOutputUrl(imageUrl);
-  runIdText.textContent = `run_id: ${runId}`;
-  runIdText.hidden = false;
-  downloadOutputBtn.hidden = false;
+  renderOutputUrl(resolvedImageUrl);
+  if (runIdText) {
+    runIdText.textContent = `run_id: ${runId}`;
+    runIdText.hidden = false;
+  }
+  if (downloadOutputBtn) {
+    downloadOutputBtn.hidden = false;
+  }
+  if (visualQaPanel) {
+    visualQaPanel.hidden = false;
+  }
+  if (qaFeedbackPanel) {
+    qaFeedbackPanel.hidden = false;
+  }
+  clearFinalOutputResult();
+  clearRegeneratedOutputResult();
+  setVisualQaStatus(`Run ${runId} ready for manual QA.`, false);
+  setQaFeedbackStatus("Save QA feedback to create a corrected regeneration attempt.", false);
+  syncPostResultControls();
   resultPanel.hidden = false;
 }
 
@@ -470,9 +590,7 @@ function getInteriorPhotoCount(payload) {
 }
 
 function renderOutputUrl(imageUrl) {
-  outputUrlLink.href = imageUrl;
-  outputUrlLink.textContent = `${isHostedOutputUrl(imageUrl) ? "Hosted output URL" : "Local output URL"}: ${imageUrl}`;
-  outputUrlLink.hidden = false;
+  renderUrlLink(outputUrlLink, imageUrl, "Hosted output URL", "Local output URL");
 }
 
 function showInputPreview(file) {
@@ -501,15 +619,38 @@ function clearResult() {
 function clearRunArtifacts() {
   currentOutputUrl = "";
   currentRunId = "";
-  outputImage.removeAttribute("src");
-  outputImage.hidden = true;
-  outputImage.onerror = null;
-  downloadOutputBtn.hidden = true;
-  runIdText.textContent = "";
-  runIdText.hidden = true;
-  outputUrlLink.removeAttribute("href");
-  outputUrlLink.textContent = "";
-  outputUrlLink.hidden = true;
+  currentFinalOutputUrl = "";
+  qaFeedbackSavedForRunId = "";
+  latestRegenerationResult = null;
+  if (outputImage) {
+    outputImage.removeAttribute("src");
+    outputImage.hidden = true;
+    outputImage.onerror = null;
+  }
+  if (downloadOutputBtn) {
+    downloadOutputBtn.hidden = true;
+  }
+  if (runIdText) {
+    runIdText.textContent = "";
+    runIdText.hidden = true;
+  }
+  if (outputUrlLink) {
+    outputUrlLink.removeAttribute("href");
+    outputUrlLink.textContent = "";
+    outputUrlLink.hidden = true;
+  }
+  clearFinalOutputResult();
+  clearRegeneratedOutputResult();
+  if (visualQaPanel) {
+    visualQaPanel.hidden = true;
+  }
+  if (qaFeedbackPanel) {
+    qaFeedbackPanel.hidden = true;
+  }
+  setVisualQaStatus("No active run.", false);
+  setQaFeedbackStatus("No active run.", false);
+  clearQaFeedbackForm();
+  syncPostResultControls();
   if (uploadDebugPanel) {
     uploadDebugPanel.hidden = true;
   }
@@ -525,7 +666,9 @@ function clearRunArtifacts() {
   if (debugBackendInteriorCount) {
     debugBackendInteriorCount.textContent = "-";
   }
-  pipelinePanel.hidden = true;
+  if (pipelinePanel) {
+    pipelinePanel.hidden = true;
+  }
   hideUploadWarning();
   hideError();
 }
@@ -588,7 +731,10 @@ function initializeProgressList() {
 }
 
 function resetProgress() {
-  pipelinePanel.hidden = false;
+  if (pipelinePanel) {
+    pipelinePanel.hidden = false;
+  }
+  if (!progressList) return;
   for (const item of progressList.querySelectorAll("li")) {
     item.className = "";
   }
@@ -602,26 +748,31 @@ function setCurrentStep(label) {
 }
 
 function markStepRunning(label) {
+  if (!progressList) return;
   const item = progressList.querySelector(`[data-step="${cssEscape(label)}"]`);
   if (!item) return;
   item.className = "is-running";
 }
 
 function markStepDone(label) {
+  if (!progressList) return;
   const item = progressList.querySelector(`[data-step="${cssEscape(label)}"]`);
   if (!item) return;
   item.className = "is-done";
 }
 
 function markStepFailed(label) {
+  if (!progressList) return;
   const item = progressList.querySelector(`[data-step="${cssEscape(label)}"]`);
   if (!item) return;
   item.className = "is-failed";
 }
 
 function setRunning(isRunning) {
-  generateButton.disabled = isRunning;
-  generateButton.textContent = isRunning ? "Generating..." : "Generate Draft";
+  if (generateButton) {
+    generateButton.disabled = isRunning;
+    generateButton.textContent = isRunning ? "Generating..." : "Generate Draft";
+  }
 }
 
 function setStatus(message, isError) {
@@ -644,9 +795,10 @@ function friendlyErrorMessage(error) {
   if (
     message.includes("ENABLE_OPENAI_IMAGE_GENERATION=true") ||
     message.includes("OPENAI_IMAGE_DRY_RUN=false") ||
-    message.includes("OPENAI_API_KEY is required")
+    message.includes("image API key is required") ||
+    message.includes("API key is required")
   ) {
-    return "OpenAI generation is disabled on the backend. Enable ENABLE_OPENAI_IMAGE_GENERATION=true and OPENAI_IMAGE_DRY_RUN=false, then restart the backend.";
+    return "OpenAI generation is disabled on the backend. Enable image generation, disable dry-run mode, and make sure the backend image credentials are configured before restarting.";
   }
   return message;
 }
@@ -709,6 +861,19 @@ function toUrl(path) {
   return path.startsWith("/") ? path : `/${path}`;
 }
 
+function getApiBaseUrl() {
+  return window.location.origin.replace(/\/$/, "");
+}
+
+function resolveAssetUrl(url) {
+  if (!url) return "";
+  if (/^https?:\/\//i.test(url)) return url;
+  const base = getApiBaseUrl ? getApiBaseUrl() : "";
+  if (!base) return url;
+  if (url.startsWith("/")) return `${base}${url}`;
+  return `${base}/${url}`;
+}
+
 function pickDisplayImageUrl(result) {
   if (!result || typeof result !== "object") return "";
   return (
@@ -726,8 +891,442 @@ function pickDisplayImageUrl(result) {
   );
 }
 
+function pickFinalImageUrl(result) {
+  if (!result || typeof result !== "object") return "";
+  return (
+    result?.final?.public_output_url ||
+    result?.cloudinary?.final?.secure_url ||
+    result?.public_output_url ||
+    result?.final?.final_image_preview_url ||
+    result?.preview_url ||
+    ""
+  );
+}
+
+function pickRegeneratedImageUrl(result) {
+  if (!result || typeof result !== "object") return "";
+  return (
+    result?.outputs?.public_output_url ||
+    result?.cloudinary?.regenerated?.secure_url ||
+    result?.public_output_url ||
+    result?.outputs?.output_preview_url ||
+    result?.preview_url ||
+    ""
+  );
+}
+
 function isHostedOutputUrl(url) {
   return /^https:\/\/res\.cloudinary\.com\//.test(String(url || ""));
+}
+
+function renderUrlLink(linkEl, url, hostedLabel, localLabel) {
+  if (!linkEl) return;
+  const resolvedUrl = resolveAssetUrl(url);
+  if (!resolvedUrl) {
+    linkEl.removeAttribute("href");
+    linkEl.textContent = "";
+    linkEl.hidden = true;
+    return;
+  }
+  linkEl.href = resolvedUrl;
+  linkEl.textContent = `${isHostedOutputUrl(resolvedUrl) ? hostedLabel : localLabel}: ${resolvedUrl}`;
+  linkEl.hidden = false;
+}
+
+function setVisualQaStatus(message, isError) {
+  if (!visualQaStatusText) return;
+  visualQaStatusText.textContent = message || "";
+  visualQaStatusText.classList.toggle("is-error", Boolean(isError));
+}
+
+function setQaFeedbackStatus(message, isError) {
+  if (!qaFeedbackStatusText) return;
+  qaFeedbackStatusText.textContent = message || "";
+  qaFeedbackStatusText.classList.toggle("is-error", Boolean(isError));
+}
+
+function syncPostResultControls() {
+  const hasRun = Boolean(currentRunId);
+  const disableQa = !hasRun || visualQaRequestInFlight || finalizeRequestInFlight;
+  const disableFinalize = !hasRun || finalizeRequestInFlight || visualQaRequestInFlight || qaFeedbackRequestInFlight || regenerateRequestInFlight;
+  const disableSaveFeedback = !hasRun || qaFeedbackRequestInFlight || regenerateRequestInFlight || finalizeRequestInFlight || visualQaRequestInFlight;
+  const disableRegenerate =
+    !hasRun ||
+    regenerateRequestInFlight ||
+    qaFeedbackRequestInFlight ||
+    finalizeRequestInFlight ||
+    visualQaRequestInFlight ||
+    qaFeedbackSavedForRunId !== currentRunId;
+
+  if (qaPassedBtn) qaPassedBtn.disabled = disableQa;
+  if (qaNeedsFixBtn) qaNeedsFixBtn.disabled = disableQa;
+  if (qaFailedBtn) qaFailedBtn.disabled = disableQa;
+  if (finalizeOutputBtn) finalizeOutputBtn.disabled = disableFinalize;
+  if (saveQaFeedbackBtn) saveQaFeedbackBtn.disabled = disableSaveFeedback;
+  if (regenerateWithFeedbackBtn) regenerateWithFeedbackBtn.disabled = disableRegenerate;
+}
+
+function clearFinalOutputResult() {
+  currentFinalOutputUrl = "";
+  if (finalOutputImage) {
+    finalOutputImage.removeAttribute("src");
+    finalOutputImage.hidden = true;
+    finalOutputImage.onerror = null;
+  }
+  if (finalOutputUrlLink) {
+    finalOutputUrlLink.removeAttribute("href");
+    finalOutputUrlLink.textContent = "";
+    finalOutputUrlLink.hidden = true;
+  }
+  if (finalOutputStatusText) {
+    finalOutputStatusText.textContent = "No final output yet.";
+  }
+  if (finalOutputPanel) {
+    finalOutputPanel.hidden = true;
+  }
+}
+
+function clearRegeneratedOutputResult() {
+  latestRegenerationResult = null;
+  if (regeneratedOutputImage) {
+    regeneratedOutputImage.removeAttribute("src");
+    regeneratedOutputImage.hidden = true;
+    regeneratedOutputImage.onerror = null;
+  }
+  if (regeneratedOutputUrlLink) {
+    regeneratedOutputUrlLink.removeAttribute("href");
+    regeneratedOutputUrlLink.textContent = "";
+    regeneratedOutputUrlLink.hidden = true;
+  }
+  if (regeneratedOutputStatusText) {
+    regeneratedOutputStatusText.textContent = "No regenerated output yet.";
+  }
+  if (regeneratedOutputPanel) {
+    regeneratedOutputPanel.hidden = true;
+  }
+}
+
+function renderFinalOutputResult(result) {
+  const preferredUrl = pickFinalImageUrl(result);
+  const resolvedUrl = resolveAssetUrl(preferredUrl);
+  const localFallbackUrl = resolveAssetUrl(result?.final?.final_image_preview_url || result?.preview_url || "");
+  const finalStatus = result?.final_status || "finalized";
+  const qaStatus = result?.qa?.qa_status || "unknown";
+
+  currentFinalOutputUrl = resolvedUrl || localFallbackUrl;
+
+  if (finalOutputImage) {
+    finalOutputImage.src = currentFinalOutputUrl;
+    finalOutputImage.hidden = !currentFinalOutputUrl;
+    finalOutputImage.onerror = () => {
+      if (!localFallbackUrl || finalOutputImage.src.endsWith(localFallbackUrl)) return;
+      currentFinalOutputUrl = localFallbackUrl;
+      finalOutputImage.src = localFallbackUrl;
+      renderUrlLink(finalOutputUrlLink, localFallbackUrl, "Hosted final URL", "Local final URL");
+    };
+  }
+
+  renderUrlLink(finalOutputUrlLink, currentFinalOutputUrl, "Hosted final URL", "Local final URL");
+  if (finalOutputStatusText) {
+    finalOutputStatusText.textContent = `Final status: ${finalStatus}. Visual QA: ${qaStatus}.`;
+  }
+  if (finalOutputPanel) {
+    finalOutputPanel.hidden = false;
+  }
+}
+
+function renderRegeneratedOutputResult(result) {
+  latestRegenerationResult = result || null;
+  const preferredUrl = pickRegeneratedImageUrl(result);
+  const resolvedUrl = resolveAssetUrl(preferredUrl);
+  const localFallbackUrl = resolveAssetUrl(result?.outputs?.output_preview_url || result?.preview_url || "");
+  const attempt = result?.attempt ?? "?";
+  const status = result?.status || "completed";
+
+  if (regeneratedOutputImage) {
+    regeneratedOutputImage.src = resolvedUrl || localFallbackUrl;
+    regeneratedOutputImage.hidden = !(resolvedUrl || localFallbackUrl);
+    regeneratedOutputImage.onerror = () => {
+      if (!localFallbackUrl || regeneratedOutputImage.src.endsWith(localFallbackUrl)) return;
+      regeneratedOutputImage.src = localFallbackUrl;
+      renderUrlLink(regeneratedOutputUrlLink, localFallbackUrl, "Hosted regenerated URL", "Local regenerated URL");
+    };
+  }
+
+  renderUrlLink(regeneratedOutputUrlLink, resolvedUrl || localFallbackUrl, "Hosted regenerated URL", "Local regenerated URL");
+  if (regeneratedOutputStatusText) {
+    regeneratedOutputStatusText.textContent = `Attempt ${attempt}. Status: ${status}.`;
+  }
+  if (regeneratedOutputPanel) {
+    regeneratedOutputPanel.hidden = false;
+  }
+}
+
+function buildVisualQaPayload(qaStatus) {
+  if (qaStatus === "passed") {
+    return {
+      qa_status: "passed",
+      layout_preserved: "pass",
+      english_labels_correct: "pass",
+      room_roles_correct: "pass",
+      furniture_arrangement_correct: "pass",
+      bedroom_bed_count_correct: "pass",
+      dining_location_correct: "pass",
+      sofa_tv_arrangement_correct: "pass",
+      final_usable_for_demo: true,
+      notes: "Manual QA passed from frontend.",
+      issues: [],
+    };
+  }
+
+  if (qaStatus === "needs_fix") {
+    return {
+      qa_status: "needs_fix",
+      layout_preserved: "needs_review",
+      english_labels_correct: "needs_review",
+      room_roles_correct: "needs_review",
+      furniture_arrangement_correct: "needs_review",
+      bedroom_bed_count_correct: "needs_review",
+      dining_location_correct: "needs_review",
+      sofa_tv_arrangement_correct: "needs_review",
+      final_usable_for_demo: false,
+      notes: "Manual QA marked as needs fix from frontend.",
+      issues: [
+        {
+          issue_type: "manual_review_needed",
+          severity: "medium",
+          description: "Reviewer marked this draft as needing fixes.",
+        },
+      ],
+    };
+  }
+
+  return {
+    qa_status: "failed",
+    layout_preserved: "fail",
+    english_labels_correct: "fail",
+    room_roles_correct: "fail",
+    furniture_arrangement_correct: "fail",
+    bedroom_bed_count_correct: "fail",
+    dining_location_correct: "fail",
+    sofa_tv_arrangement_correct: "fail",
+    final_usable_for_demo: false,
+    notes: "Manual QA failed from frontend.",
+    issues: [
+      {
+        issue_type: "manual_qa_failed",
+        severity: "high",
+        description: "Reviewer marked this draft as failed.",
+      },
+    ],
+  };
+}
+
+async function submitVisualQa(qaStatus) {
+  if (!currentRunId) {
+    setVisualQaStatus("No active run.", true);
+    syncPostResultControls();
+    return;
+  }
+
+  visualQaRequestInFlight = true;
+  setVisualQaStatus("Saving visual QA status...", false);
+  syncPostResultControls();
+
+  try {
+    const result = await postJson(`/api/runs/${encodeURIComponent(currentRunId)}/visual-qa`, buildVisualQaPayload(qaStatus));
+    const savedStatus = result?.qa_status || qaStatus;
+    setVisualQaStatus(`Visual QA saved: ${savedStatus}.`, false);
+  } catch (error) {
+    setVisualQaStatus(friendlyErrorMessage(error), true);
+  } finally {
+    visualQaRequestInFlight = false;
+    syncPostResultControls();
+  }
+}
+
+function clearQaFeedbackForm() {
+  const issueCheckboxIds = [
+    "issueLayoutDrift",
+    "issueWrongRoomRole",
+    "issueDiningWrongRoom",
+    "issueSofaTvWrongRoom",
+    "issueWrongBedCount",
+    "issueLabelsWrong",
+    "issueFurnitureTooMuch",
+    "issueFurnitureMissing",
+    "issueStyleNotWatercolor",
+    "issuePaletteTooDark",
+    "issueWallsTooDark",
+    "issueWashingMachineWrongPosition",
+    "issueFurnitureOrientationWrong",
+    "issueOther",
+  ];
+  for (const id of issueCheckboxIds) {
+    const checkbox = byId(id);
+    if (checkbox) checkbox.checked = false;
+  }
+  setValue("qaFeedbackNotesInput", "");
+  setText("qaFeedbackPlanSummary", "");
+  setHidden("qaFeedbackPlanSummary", true);
+}
+
+function collectQaFeedbackIssues() {
+  const issueConfigs = [
+    ["issueLayoutDrift", "layout_drift", "high", "The generated image appears to drift from the original floorplan layout."],
+    ["issueWrongRoomRole", "wrong_room_role", "high", "The room functions do not match the assigned room roles."],
+    ["issueDiningWrongRoom", "dining_wrong_room", "high", "The dining table should stay in the living/dining area, not in another room."],
+    ["issueSofaTvWrongRoom", "sofa_tv_wrong_room", "high", "The sofa and TV should be placed in the assigned lounge/media room."],
+    ["issueWrongBedCount", "wrong_bed_count", "high", "The bedroom should contain only one bed or two single beds."],
+    ["issueLabelsWrong", "labels_wrong", "medium", "The labels should be correct English room labels."],
+    ["issueFurnitureTooMuch", "furniture_too_much", "medium", "The furniture density should be reduced to the essential pieces only."],
+    ["issueFurnitureMissing", "furniture_missing", "medium", "Important furniture appears to be missing from the assigned rooms."],
+    ["issueStyleNotWatercolor", "style_not_watercolor", "medium", "The output should use a softer Japanese watercolor style."],
+    ["issuePaletteTooDark", "palette_too_dark", "medium", "The output palette is too dark. Please brighten the overall image with lighter warm neutral tones."],
+    ["issueWallsTooDark", "walls_too_dark", "medium", "Wall and partition areas are too dark or black. Please use lighter neutral wall tones instead."],
+    ["issueWashingMachineWrongPosition", "washing_machine_wrong_position", "high", "The washing machine should be placed in the Wash Room at the marked Wash / 洗 location."],
+    ["issueFurnitureOrientationWrong", "furniture_orientation_wrong", "medium", "Furniture orientation needs correction. Sofa and TV should face each other, coffee table should be between them, beds should align to walls, and dining furniture should be neatly aligned."],
+    ["issueOther", "other", "medium", "The output needs additional manual corrections."],
+  ];
+
+  return issueConfigs
+    .filter(([id]) => Boolean(byId(id)?.checked))
+    .map(([, issueType, severity, description]) => ({
+      issue_type: issueType,
+      severity,
+      description,
+    }));
+}
+
+function buildQaFeedbackPayload() {
+  const notes = String(qaFeedbackNotesInput?.value || "").trim();
+  const issues = collectQaFeedbackIssues();
+  if (!issues.length && notes) {
+    issues.push({
+      issue_type: "other",
+      severity: "medium",
+      description: notes,
+    });
+  }
+
+  return {
+    feedback_status: "needs_regeneration",
+    target_image: "latest_draft",
+    issues,
+    freeform_feedback: notes || null,
+  };
+}
+
+function backendErrorMessage(error) {
+  const message = error instanceof Error ? error.message : "Request failed.";
+  if (message.includes("qa_feedback.json is required before regeneration")) {
+    return "QA feedback is required before regeneration. Save QA Feedback first.";
+  }
+  if (message.includes("confirm_generation must be true")) {
+    return "Generation confirmation is required.";
+  }
+  if (message.includes("prompt_package.json or image_generation_request_preview.json is required")) {
+    return "Prompt package or preview request is missing. Generate/preview a draft first.";
+  }
+  if (message.includes("Only provider=openai is supported")) {
+    return "Only OpenAI generation is supported.";
+  }
+  return message;
+}
+
+async function submitQaFeedback() {
+  if (!currentRunId) {
+    setQaFeedbackStatus("No active run.", true);
+    syncPostResultControls();
+    return;
+  }
+
+  const payload = buildQaFeedbackPayload();
+  if (!payload.issues.length && !String(payload.freeform_feedback || "").trim()) {
+    setQaFeedbackStatus("Select at least one issue or enter feedback before saving.", true);
+    return;
+  }
+
+  qaFeedbackRequestInFlight = true;
+  setQaFeedbackStatus("Saving QA feedback...", false);
+  syncPostResultControls();
+
+  try {
+    const result = await postJson(`/api/runs/${encodeURIComponent(currentRunId)}/qa-feedback`, payload);
+    qaFeedbackSavedForRunId = currentRunId;
+    setQaFeedbackStatus("QA feedback saved.", false);
+    const correctionSummary = result?.correction_plan?.summary || "Correction plan created.";
+    setText("qaFeedbackPlanSummary", correctionSummary);
+    setHidden("qaFeedbackPlanSummary", false);
+  } catch (error) {
+    setQaFeedbackStatus(backendErrorMessage(error), true);
+  } finally {
+    qaFeedbackRequestInFlight = false;
+    syncPostResultControls();
+  }
+}
+
+async function regenerateWithFeedback() {
+  if (!currentRunId) {
+    setQaFeedbackStatus("No active run.", true);
+    syncPostResultControls();
+    return;
+  }
+
+  regenerateRequestInFlight = true;
+  setQaFeedbackStatus("Regenerating with feedback...", false);
+  syncPostResultControls();
+
+  try {
+    const result = await postJson(`/api/runs/${encodeURIComponent(currentRunId)}/regenerate-with-feedback`, {
+      confirm_generation: true,
+      feedback_source: "latest",
+      use_reference_images: true,
+      max_reference_images: 4,
+      output_format: "png",
+    });
+    renderRegeneratedOutputResult(result);
+    setQaFeedbackStatus(`Regenerated output created. Attempt ${result?.attempt ?? "?"}.`, false);
+  } catch (error) {
+    setQaFeedbackStatus(backendErrorMessage(error), true);
+  } finally {
+    regenerateRequestInFlight = false;
+    syncPostResultControls();
+  }
+}
+
+async function finalizeCurrentRunOutput() {
+  if (!currentRunId) {
+    setVisualQaStatus("No active run.", true);
+    syncPostResultControls();
+    return;
+  }
+
+  finalizeRequestInFlight = true;
+  setVisualQaStatus("Finalizing output...", false);
+  syncPostResultControls();
+
+  try {
+    const result = await postJson(`/api/runs/${encodeURIComponent(currentRunId)}/finalize-output`, {
+      source: "auto",
+      force: false,
+    });
+    renderFinalOutputResult(result);
+    setVisualQaStatus("Final output created.", false);
+  } catch (error) {
+    const message = friendlyErrorMessage(error);
+    if (message.includes("pass visual QA before finalizing")) {
+      setVisualQaStatus(
+        "Visual QA must pass before finalizing. Mark QA Passed first, or use force from backend/debug.",
+        true,
+      );
+    } else {
+      setVisualQaStatus(message, true);
+    }
+  } finally {
+    finalizeRequestInFlight = false;
+    syncPostResultControls();
+  }
 }
 
 function cssEscape(value) {

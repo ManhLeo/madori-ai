@@ -55,6 +55,7 @@ class FurniturePlacementService:
         "stove": "kitchen",
         "sink": "kitchen",
         "cabinet": "kitchen",
+        "washing_machine": "wash_area",
         "bathtub": "bath_room",
         "shower": "bath_room",
         "towel": "bath_room",
@@ -255,7 +256,8 @@ class FurniturePlacementService:
             return furniture.model_copy(update=update), warnings
 
         exclusion_zones = self.build_exclusion_zones(layout, room, furniture.type, all_planned_items)
-        candidates = self.select_candidate_positions(furniture.type, room.bbox, size)
+        anchor_bbox = self._find_washing_machine_anchor(layout, room, furniture.type)
+        candidates = self.select_candidate_positions(furniture.type, room.bbox, size, anchor_bbox)
         collision_adjustment_used = False
         for candidate in candidates:
             candidate_bbox = self._candidate_bbox_from_anchor(candidate, size)
@@ -284,6 +286,11 @@ class FurniturePlacementService:
                 update["placement_status"] = "auto_placed"
                 update["placement_confidence"] = placement_confidence
                 update["placement_notes"] = notes
+                orientation_metadata = self._orientation_metadata_for_furniture(furniture.type, room, anchor_bbox is not None)
+                update.update(orientation_metadata)
+                if furniture.type == "washing_machine":
+                    update["required_by_fixture_anchor"] = anchor_bbox is not None
+                    update["anchor_fixture_id"] = "fixture_washing_machine_anchor_001" if anchor_bbox is not None else None
                 return furniture.model_copy(update=update), warnings
             if notes:
                 collision_adjustment_used = True
@@ -331,6 +338,7 @@ class FurniturePlacementService:
             "stove": (0.18, 55, 0.18, 55),
             "sink": (0.20, 60, 0.16, 50),
             "cabinet": (0.24, 90, 0.18, 70),
+            "washing_machine": (0.18, 70, 0.18, 70),
             "bathtub": (0.42, 140, 0.25, 85),
             "shower": (0.20, 65, 0.20, 65),
             "towel": (0.10, 30, 0.12, 36),
@@ -343,7 +351,7 @@ class FurniturePlacementService:
             return None
         return {"width": width, "height": height}
 
-    def select_candidate_positions(self, furniture_type: str, room_bbox: LayoutBoundingBox, size: dict) -> list[dict]:
+    def select_candidate_positions(self, furniture_type: str, room_bbox: LayoutBoundingBox, size: dict, anchor_bbox: LayoutBoundingBox | None = None) -> list[dict]:
         margin = self._room_margin(room_bbox)
         x_min = int(room_bbox.x_min + margin)
         y_min = int(room_bbox.y_min + margin)
@@ -368,6 +376,10 @@ class FurniturePlacementService:
             "bottom-edge": {"x": center_x - size["width"] // 2, "y": y_max - size["height"]},
             "top-edge": {"x": center_x - size["width"] // 2, "y": y_min},
         }
+        if anchor_bbox is not None:
+            anchor_center_x = int((anchor_bbox.x_min + anchor_bbox.x_max) / 2) - size["width"] // 2
+            anchor_center_y = int((anchor_bbox.y_min + anchor_bbox.y_max) / 2) - size["height"] // 2
+            anchors["wash-anchor"] = {"x": anchor_center_x, "y": anchor_center_y}
 
         type_candidates = {
             "sofa_1_seater": ["bottom-left", "left-center", "bottom-center", "top-left"],
@@ -393,6 +405,7 @@ class FurniturePlacementService:
             "stove": ["left-edge", "bottom-edge", "top-edge"],
             "sink": ["left-edge", "bottom-edge", "top-edge"],
             "cabinet": ["left-edge", "top-edge", "bottom-edge"],
+            "washing_machine": ["wash-anchor", "left-edge", "bottom-edge", "top-edge"],
             "bathtub": ["left-center", "right-center", "center"],
             "shower": ["top-right", "bottom-right", "top-left"],
             "towel": ["top-right", "top-left", "right-center"],
@@ -685,6 +698,8 @@ class FurniturePlacementService:
             return ["bed_room"]
         if normalized in {"kitchen_counter", "sink", "stove", "cabinet"}:
             return ["kitchen"]
+        if normalized == "washing_machine":
+            return ["wash_area"]
         if normalized in {"bathtub", "shower", "towel"}:
             return ["bath_room"]
         if normalized in {"dining_table", "chair"}:
@@ -702,6 +717,8 @@ class FurniturePlacementService:
             return ["main_bedroom", "guest_bedroom"]
         if normalized in {"kitchen_counter", "sink", "stove", "cabinet"}:
             return ["kitchen"]
+        if normalized == "washing_machine":
+            return ["wash_room"]
         if normalized in {"bathtub", "shower", "towel"}:
             return ["bath_room"]
         if normalized in {"dining_table", "chair"}:
@@ -742,6 +759,41 @@ class FurniturePlacementService:
             for item, recovered_type in zip(unknown_items, remaining):
                 recovered[item.id] = recovered_type
         return recovered
+
+    def _find_washing_machine_anchor(
+        self,
+        layout: LayoutValidationArtifact,
+        room,
+        furniture_type: str,
+    ) -> LayoutBoundingBox | None:
+        if furniture_type != "washing_machine" or room is None:
+            return None
+        for fixture in layout.fixtures:
+            if str(getattr(fixture, "type", "") or "") != "washing_machine_anchor":
+                continue
+            if fixture.bbox is not None:
+                return fixture.bbox
+            if fixture.approx_bbox is not None:
+                return fixture.approx_bbox
+        return None
+
+    @staticmethod
+    def _orientation_metadata_for_furniture(furniture_type: str, room, anchored_to_wash: bool) -> dict:
+        normalized = str(furniture_type or "").strip().lower()
+        if normalized.startswith("sofa"):
+            return {"orientation": "south", "facing_to": "tv", "orientation_rule": "face_tv_when_possible", "aligned_to": "room_axis"}
+        if normalized in {"tv", "tv_stand"}:
+            return {"orientation": "north", "facing_to": "sofa", "orientation_rule": "face_sofa_when_possible", "aligned_to": "wall"}
+        if normalized == "coffee_table":
+            return {"orientation": "unknown", "facing_to": "sofa", "orientation_rule": "between_sofa_and_tv_when_possible", "aligned_to": "room_center"}
+        if "bed" in normalized:
+            return {"orientation": "east", "facing_to": "room_center", "orientation_rule": "align_to_wall_with_headboard", "aligned_to": "wall", "headboard_against_wall": True}
+        if normalized in {"dining_table", "chair"}:
+            aligned_to = "kitchen_side" if str(getattr(room, "functional_role", "") or "") == "living_dining" else "room_axis"
+            return {"orientation": "unknown", "facing_to": "room_center", "orientation_rule": "align_neatly_and_keep_circulation_clear", "aligned_to": aligned_to}
+        if normalized == "washing_machine":
+            return {"orientation": "unknown", "facing_to": "wall", "orientation_rule": "align_to_wash_anchor_or_wall", "aligned_to": "wash_anchor" if anchored_to_wash else "wall"}
+        return {"orientation": "unknown", "facing_to": "unknown"}
 
     @staticmethod
     def bbox_area(bbox: LayoutBoundingBox) -> int:

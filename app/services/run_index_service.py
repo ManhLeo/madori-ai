@@ -9,6 +9,8 @@ from fastapi import HTTPException
 from app.schemas.run import (
     AnalysisSummary,
     ArtifactIndexEntry,
+    FinalOutputResponse,
+    FinalOutputSummary,
     FloorplanAnalysisValidatedArtifact,
     FloorplanSemanticAnalysisArtifact,
     FurniturePlacementArtifact,
@@ -30,6 +32,10 @@ from app.schemas.run import (
     PipelineSummary,
     PromptPackageArtifact,
     PromptPackageSummary,
+    QAFeedbackResponse,
+    QAFeedbackSummary,
+    RegenerationAttemptResponse,
+    RegenerationSummary,
     RenderPlanArtifact,
     RenderPlanSummary,
     RoomFunctionAssignmentArtifact,
@@ -39,6 +45,8 @@ from app.schemas.run import (
     RunMetadataSummary,
     StructureLockedCompositeArtifact,
     StructureLockedCompositeSummary,
+    VisualQAReportResponse,
+    VisualQASummary,
 )
 
 
@@ -172,6 +180,21 @@ class RunIndexService:
             "category": "render",
             "type": "image",
         },
+        "visual_qa_report": {
+            "filename": "visual_qa_report.json",
+            "category": "qa",
+            "type": "json",
+        },
+        "qa_feedback": {
+            "filename": "qa_feedback.json",
+            "category": "qa",
+            "type": "json",
+        },
+        "final_output": {
+            "filename": "final_output.json",
+            "category": "final",
+            "type": "json",
+        },
         "artifact_index": {
             "filename": "artifact_index.json",
             "category": "index",
@@ -207,7 +230,13 @@ class RunIndexService:
         image_generation_request_preview_artifact = self._load_optional_image_generation_request_preview_artifact(run_dir)
         image_generation_draft_artifact = self._load_optional_image_generation_draft_artifact(run_dir)
         structure_locked_composite_artifact = self._load_optional_structure_locked_composite_artifact(run_dir)
+        visual_qa_artifact = self._load_optional_visual_qa_artifact(run_dir)
+        qa_feedback_artifact = self._load_optional_qa_feedback_artifact(run_dir)
+        final_output_artifact = self._load_optional_final_output_artifact(run_dir)
+        latest_regeneration_artifact = self._load_optional_latest_regeneration_artifact(run_dir, metadata)
         self._apply_image_generation_draft_external_urls(artifact_entries, image_generation_draft_artifact)
+        self._apply_final_output_external_urls(artifact_entries, final_output_artifact)
+        self._apply_regeneration_external_urls(artifact_entries, latest_regeneration_artifact)
         artifact_index = RunArtifactIndex(
             run_id=metadata.run_id,
             generated_at=datetime.now(timezone.utc),
@@ -237,11 +266,18 @@ class RunIndexService:
         image_generation_request_preview_summary = self._build_image_generation_request_preview_summary(metadata, image_generation_request_preview_artifact)
         image_generation_draft_summary = self._build_image_generation_draft_summary(metadata, image_generation_draft_artifact)
         structure_locked_composite_summary = self._build_structure_locked_composite_summary(metadata, structure_locked_composite_artifact)
+        visual_qa_summary = self._build_visual_qa_summary(metadata, visual_qa_artifact)
+        final_output_summary = self._build_final_output_summary(metadata, final_output_artifact)
 
         summary = RunMetadataSummary(
             run_id=metadata.run_id,
             generated_at=datetime.now(timezone.utc),
             artifact_index_path=self._relative_storage_path(artifact_index_path),
+            visual_qa_report_path=metadata.visual_qa_report_path,
+            qa_feedback_path=metadata.qa_feedback_path,
+            final_output_path=metadata.final_output_path,
+            latest_regeneration_path=metadata.latest_regeneration_path,
+            public_output_url=metadata.public_output_url,
             artifacts=artifact_entries,
             input_summary=input_summary,
             pipeline_summary=pipeline_summary,
@@ -258,6 +294,10 @@ class RunIndexService:
             image_generation_request_preview_summary=image_generation_request_preview_summary,
             image_generation_draft_summary=image_generation_draft_summary,
             structure_locked_composite_summary=structure_locked_composite_summary,
+            visual_qa_summary=visual_qa_summary,
+            qa_feedback_summary=self._build_qa_feedback_summary(metadata, qa_feedback_artifact),
+            final_output_summary=final_output_summary,
+            regeneration_summary=self._build_regeneration_summary(metadata, latest_regeneration_artifact),
             warnings=[],
             errors=[],
         )
@@ -306,11 +346,13 @@ class RunIndexService:
         artifacts_dir = self._artifacts_dir(metadata, run_dir)
         known_artifact_entries = self._collect_known_artifact_entries(artifacts_dir)
         entries.extend(known_artifact_entries)
+        regeneration_artifact_entries = self._collect_regeneration_artifact_entries(metadata, artifacts_dir)
+        entries.extend(regeneration_artifact_entries)
 
         if artifacts_dir.exists():
             known_filenames = {spec["filename"] for spec in self.KNOWN_ARTIFACT_SPECS.values()}
             for path in sorted(artifacts_dir.iterdir(), key=lambda item: item.name):
-                if not path.is_file() or path.name in known_filenames:
+                if not path.is_file() or path.name in known_filenames or self._is_regeneration_artifact_filename(path.name):
                     continue
                 entries.append(self._entry_from_path(path, "artifact"))
 
@@ -319,9 +361,17 @@ class RunIndexService:
         entries.append(self._entry_from_path(draft_output_path, "output", key="draft_output", entry_type="image"))
         composite_output_path = outputs_dir / f"{metadata.run_id}_structure_locked_composite.png"
         entries.append(self._entry_from_path(composite_output_path, "output", key="structure_locked_composite_output", entry_type="image"))
+        final_output_path = outputs_dir / f"{metadata.run_id}_final.png"
+        entries.append(self._entry_from_path(final_output_path, "output", key="final_image", entry_type="image"))
+        regeneration_output_entries = self._collect_regeneration_output_entries(metadata, outputs_dir)
+        entries.extend(regeneration_output_entries)
         if outputs_dir.exists():
             for path in sorted(outputs_dir.iterdir(), key=lambda item: item.name):
-                if not path.is_file() or path in {draft_output_path, composite_output_path}:
+                if (
+                    not path.is_file()
+                    or path in {draft_output_path, composite_output_path, final_output_path}
+                    or self._is_regeneration_output_filename(metadata.run_id, path.name)
+                ):
                     continue
                 entries.append(self._entry_from_path(path, "output"))
 
@@ -337,6 +387,69 @@ class RunIndexService:
                     spec["category"],
                     key=key,
                     entry_type=spec["type"],
+                )
+            )
+        return entries
+
+    def _collect_regeneration_artifact_entries(self, metadata: RunMetadata, artifacts_dir: Path) -> list[ArtifactIndexEntry]:
+        if not artifacts_dir.exists():
+            return []
+        paths = sorted(
+            [path for path in artifacts_dir.iterdir() if path.is_file() and self._is_regeneration_artifact_filename(path.name)],
+            key=lambda item: item.name,
+        )
+        if not paths:
+            return []
+        entries: list[ArtifactIndexEntry] = []
+        latest_path = self._resolve_latest_regeneration_artifact_path(metadata, paths)
+        if latest_path is not None:
+            entries.append(
+                self._entry_from_path(
+                    latest_path,
+                    "regeneration",
+                    key="latest_regeneration",
+                    entry_type="json",
+                )
+            )
+        for path in paths:
+            attempt = self._extract_regeneration_attempt(path.name)
+            entries.append(
+                self._entry_from_path(
+                    path,
+                    "regeneration",
+                    key=f"regeneration_attempt_{attempt}",
+                    entry_type="json",
+                )
+            )
+        return entries
+
+    def _collect_regeneration_output_entries(self, metadata: RunMetadata, outputs_dir: Path) -> list[ArtifactIndexEntry]:
+        if not outputs_dir.exists():
+            return []
+        paths = sorted(
+            [path for path in outputs_dir.iterdir() if path.is_file() and self._is_regeneration_output_filename(metadata.run_id, path.name)],
+            key=lambda item: item.name,
+        )
+        if not paths:
+            return []
+        entries: list[ArtifactIndexEntry] = []
+        latest_path = paths[-1]
+        entries.append(
+            self._entry_from_path(
+                latest_path,
+                "output",
+                key="regenerated_image_latest",
+                entry_type="image",
+            )
+        )
+        for path in paths:
+            attempt = self._extract_regeneration_output_attempt(metadata.run_id, path.name)
+            entries.append(
+                self._entry_from_path(
+                    path,
+                    "output",
+                    key=f"regenerated_image_{attempt}",
+                    entry_type="image",
                 )
             )
         return entries
@@ -858,6 +971,139 @@ class RunIndexService:
             )
         return None
 
+    def _build_visual_qa_summary(
+        self,
+        metadata: RunMetadata,
+        artifact: VisualQAReportResponse | None,
+    ) -> VisualQASummary | None:
+        if metadata.visual_qa_summary is not None:
+            return metadata.visual_qa_summary
+        if artifact is not None:
+            return VisualQASummary(
+                qa_status=artifact.qa_status,
+                final_usable_for_demo=artifact.final_usable_for_demo,
+                issues_count=len(artifact.issues),
+                warnings_count=len(artifact.warnings),
+                errors_count=len(artifact.errors),
+            )
+        return None
+
+    def _build_final_output_summary(
+        self,
+        metadata: RunMetadata,
+        artifact: FinalOutputResponse | None,
+    ) -> FinalOutputSummary | None:
+        if metadata.final_output_summary is not None:
+            return metadata.final_output_summary
+        if artifact is not None:
+            final = artifact.final if isinstance(artifact.final, dict) else {}
+            qa = artifact.qa if isinstance(artifact.qa, dict) else {}
+            cloudinary = artifact.cloudinary if isinstance(artifact.cloudinary, dict) else {}
+            return FinalOutputSummary(
+                final_status=artifact.final_status,
+                final_image_preview_url=final.get("final_image_preview_url"),
+                public_output_url=final.get("public_output_url"),
+                width=int(final.get("width") or 0),
+                height=int(final.get("height") or 0),
+                qa_status=qa.get("qa_status"),
+                cloudinary_enabled=bool(cloudinary.get("enabled")),
+                cloudinary_uploaded=bool(cloudinary.get("final", {}).get("uploaded")),
+                warnings_count=len(artifact.warnings),
+                errors_count=len(artifact.errors),
+            )
+        return None
+
+    def _build_qa_feedback_summary(
+        self,
+        metadata: RunMetadata,
+        artifact: QAFeedbackResponse | None,
+    ) -> QAFeedbackSummary | None:
+        if metadata.qa_feedback_summary is not None:
+            return metadata.qa_feedback_summary
+        if artifact is not None:
+            correction_plan = artifact.correction_plan if isinstance(artifact.correction_plan, dict) else {}
+            highest_severity = "low"
+            for issue in artifact.issues:
+                if issue.severity == "high":
+                    highest_severity = "high"
+                    break
+                if issue.severity == "medium":
+                    highest_severity = "medium"
+            return QAFeedbackSummary(
+                feedback_status=artifact.feedback_status,
+                issues_count=len(artifact.issues),
+                highest_severity=highest_severity,
+                correction_plan_status=str(correction_plan.get("status") or "created"),
+            )
+        return None
+
+    def _build_regeneration_summary(
+        self,
+        metadata: RunMetadata,
+        artifact: RegenerationAttemptResponse | None,
+    ) -> RegenerationSummary | None:
+        if metadata.regeneration_summary is not None:
+            return metadata.regeneration_summary
+        if artifact is not None:
+            outputs = artifact.outputs if isinstance(artifact.outputs, dict) else {}
+            source_feedback = artifact.source_feedback if isinstance(artifact.source_feedback, dict) else {}
+            cloudinary = artifact.cloudinary if isinstance(artifact.cloudinary, dict) else {}
+            return RegenerationSummary(
+                latest_attempt=artifact.attempt,
+                status=artifact.status,
+                issues_count=int(source_feedback.get("issues_count") or 0),
+                highest_severity=str(source_feedback.get("highest_severity") or "low"),
+                output_preview_url=outputs.get("output_preview_url"),
+                public_output_url=outputs.get("public_output_url"),
+                cloudinary_uploaded=bool(cloudinary.get("regenerated", {}).get("uploaded")),
+                warnings_count=len(artifact.warnings),
+                errors_count=len(artifact.errors),
+            )
+        return None
+
+    def _apply_final_output_external_urls(
+        self,
+        entries: list[ArtifactIndexEntry],
+        artifact: FinalOutputResponse | None,
+    ) -> None:
+        if artifact is None or not isinstance(artifact.final, dict):
+            return
+        public_output_url = artifact.final.get("public_output_url")
+        cloudinary_secure_url = None
+        if isinstance(artifact.cloudinary, dict):
+            cloudinary_secure_url = artifact.cloudinary.get("final", {}).get("secure_url")
+        for entry in entries:
+            if entry.key == "final_output":
+                entry.external_url = cloudinary_secure_url
+                entry.public_output_url = public_output_url
+                entry.cloudinary_secure_url = cloudinary_secure_url
+            elif entry.key == "final_image" or entry.filename == f"{artifact.run_id}_final.png":
+                entry.external_url = cloudinary_secure_url
+                entry.public_output_url = public_output_url
+                entry.cloudinary_secure_url = cloudinary_secure_url
+
+    def _apply_regeneration_external_urls(
+        self,
+        entries: list[ArtifactIndexEntry],
+        artifact: RegenerationAttemptResponse | None,
+    ) -> None:
+        if artifact is None or not isinstance(artifact.outputs, dict):
+            return
+        outputs = artifact.outputs
+        public_output_url = outputs.get("public_output_url")
+        cloudinary_secure_url = None
+        if isinstance(artifact.cloudinary, dict):
+            cloudinary_secure_url = artifact.cloudinary.get("regenerated", {}).get("secure_url")
+        for entry in entries:
+            if entry.key == "latest_regeneration":
+                entry.external_url = cloudinary_secure_url
+                entry.public_output_url = public_output_url
+                entry.cloudinary_secure_url = cloudinary_secure_url
+            elif entry.key == "regenerated_image_latest" or entry.key == f"regenerated_image_{artifact.attempt}":
+                entry.external_url = cloudinary_secure_url
+                entry.public_output_url = public_output_url
+                entry.cloudinary_secure_url = cloudinary_secure_url
+
     @staticmethod
     def _artifact_exists(entries: list[ArtifactIndexEntry], key: str) -> bool:
         return any(entry.key == key and entry.exists for entry in entries)
@@ -887,6 +1133,7 @@ class RunIndexService:
             relative_path=relative_path,
             preview_url=preview_url,
             external_url=None,
+            public_output_url=None,
             cloudinary_secure_url=None,
             size_bytes=size_bytes,
             content_type=self.ARTIFACT_CONTENT_TYPES.get(suffix),
@@ -1030,6 +1277,98 @@ class RunIndexService:
             return StructureLockedCompositeArtifact.model_validate_json(path.read_text(encoding="utf-8"))
         except (OSError, ValueError):
             return None
+
+    def _load_optional_visual_qa_artifact(self, run_dir: Path) -> VisualQAReportResponse | None:
+        path = run_dir / "artifacts" / "visual_qa_report.json"
+        if not path.exists():
+            return None
+        try:
+            return VisualQAReportResponse.model_validate_json(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return None
+
+    def _load_optional_final_output_artifact(self, run_dir: Path) -> FinalOutputResponse | None:
+        path = run_dir / "artifacts" / "final_output.json"
+        if not path.exists():
+            return None
+        try:
+            return FinalOutputResponse.model_validate_json(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return None
+
+    def _load_optional_qa_feedback_artifact(self, run_dir: Path) -> QAFeedbackResponse | None:
+        path = run_dir / "artifacts" / "qa_feedback.json"
+        if not path.exists():
+            return None
+        try:
+            return QAFeedbackResponse.model_validate_json(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return None
+
+    def _load_optional_latest_regeneration_artifact(
+        self,
+        run_dir: Path,
+        metadata: RunMetadata,
+    ) -> RegenerationAttemptResponse | None:
+        candidate: Path | None = None
+        if str(metadata.latest_regeneration_path or "").strip():
+            try:
+                candidate = self._resolve_relative_path(metadata.latest_regeneration_path)
+            except HTTPException:
+                candidate = None
+        if candidate is None or not candidate.exists():
+            artifacts_dir = run_dir / "artifacts"
+            if artifacts_dir.exists():
+                paths = sorted(
+                    [path for path in artifacts_dir.iterdir() if path.is_file() and self._is_regeneration_artifact_filename(path.name)],
+                    key=lambda item: item.name,
+                )
+                candidate = paths[-1] if paths else None
+        if candidate is None or not candidate.exists():
+            return None
+        try:
+            return RegenerationAttemptResponse.model_validate_json(candidate.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return None
+
+    @classmethod
+    def _is_regeneration_artifact_filename(cls, filename: str) -> bool:
+        return filename.startswith("regeneration_attempt_") and filename.endswith(".json")
+
+    @staticmethod
+    def _is_regeneration_output_filename(run_id: str, filename: str) -> bool:
+        return filename.startswith(f"{run_id}_regenerated_") and filename.endswith(".png")
+
+    @staticmethod
+    def _extract_regeneration_attempt(filename: str) -> int:
+        stem = Path(filename).stem
+        try:
+            return int(stem.rsplit("_", 1)[-1])
+        except ValueError:
+            return 0
+
+    @staticmethod
+    def _extract_regeneration_output_attempt(run_id: str, filename: str) -> int:
+        stem = Path(filename).stem
+        prefix = f"{run_id}_regenerated_"
+        try:
+            return int(stem.replace(prefix, "", 1))
+        except ValueError:
+            return 0
+
+    def _resolve_latest_regeneration_artifact_path(
+        self,
+        metadata: RunMetadata,
+        paths: list[Path],
+    ) -> Path | None:
+        if str(metadata.latest_regeneration_path or "").strip():
+            try:
+                configured = self._resolve_relative_path(metadata.latest_regeneration_path)
+            except HTTPException:
+                configured = None
+            if configured is not None and configured.exists():
+                return configured
+        return paths[-1] if paths else None
 
     def _safe_run_dir(self, run_id: str) -> Path:
         run_dir = (self.storage_runs_dir / run_id).resolve()

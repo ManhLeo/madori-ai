@@ -46,6 +46,8 @@ class RenderPlanService:
         "Do not create cartoon-like furniture.",
         "Do not create a generic interior unrelated to the provided layout.",
         "Do not draw unplaced furniture unless manually reviewed.",
+        "Do not render walls, partitions, wet-area blocks, or room dividers as large black or dark charcoal filled masses.",
+        "Do not place the washing machine outside the Wash Room.",
     ]
 
     def __init__(self, storage_dir: Path, storage_runs_dir: Path) -> None:
@@ -273,6 +275,12 @@ class RenderPlanService:
                     "suppression_reason": item.suppression_reason,
                     "render_action": action,
                     "prompt_action": item.prompt_action,
+                    "orientation": item.orientation,
+                    "facing_to": item.facing_to,
+                    "orientation_rule": item.orientation_rule,
+                    "aligned_to": item.aligned_to,
+                    "headboard_against_wall": item.headboard_against_wall,
+                    "required_by_fixture_anchor": item.required_by_fixture_anchor,
                     "render_instruction": instruction,
                     "manual_review_required": manual_review_required,
                 }
@@ -328,6 +336,9 @@ class RenderPlanService:
                 "sofa_base_color": str(customer_rules.get("bed_and_sofa_base_color") or "white"),
                 "labels_language": "english",
                 "suggested_floor_tone": str(recommendations.get("suggested_floor_tone") or floor_tone),
+                "bright_palette": True,
+                "light_wall_tones": True,
+                "washing_machine_only_in_wash_room": True,
             },
         }
 
@@ -352,6 +363,8 @@ class RenderPlanService:
                 "Preserve the exact floorplan structure.",
                 "Do not change wall positions.",
                 "Do not move room boundaries, doors, windows, or balcony.",
+                "Keep fixed fixtures and wet-area positions unchanged.",
+                "Keep the washing machine only in the Wash Room at the Wash / 洗 mark.",
             ],
             "room_instructions": [room["render_instruction"] for room in rooms],
             "furniture_instructions": [item["render_instruction"] for item in furniture if item["render_action"] == "draw"],
@@ -360,6 +373,8 @@ class RenderPlanService:
                 f"Use {style.get('style_name', 'soft watercolor')} style.",
                 f"Use {style.get('watercolor_strength', 'soft')} watercolor strength.",
                 f"Use {style.get('linework_style', 'clean lines')} linework.",
+                "Use a bright, airy palette with light warm beige, soft greige, pale wood, and neutral tones.",
+                "Use light neutral wall tones with thin outlines, not heavy dark wall fills.",
             ],
             "negative_constraints": negative_constraints,
         }
@@ -435,6 +450,7 @@ class RenderPlanService:
             "sink": "Draw a compact kitchen sink integrated with the kitchen counter.",
             "stove": "Draw a compact stove integrated with the kitchen counter.",
             "cabinet": "Draw kitchen cabinet storage with soft watercolor shading.",
+            "washing_machine": "Draw the washing machine only in the Wash Room at the Wash / 洗 mark, aligned to the wall or wash anchor.",
             "bathtub": "Draw a bathtub fixture with soft watercolor shading inside the bath room.",
             "shower": "Draw a shower/bath detail subtly inside the bath room.",
             "towel": "Draw a towel detail only if it does not clutter the bath room.",

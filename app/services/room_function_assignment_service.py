@@ -29,7 +29,7 @@ class RoomFunctionAssignmentService:
     KITCHEN_ALLOWED_FURNITURE = {"kitchen_counter", "sink", "stove", "cabinet", "refrigerator"}
     BATH_ROOM_ALLOWED_FURNITURE = {"bathtub", "shower", "towel"}
     TOILET_ALLOWED_FURNITURE = {"toilet", "towel"}
-    WASH_ROOM_ALLOWED_FURNITURE = {"washbasin", "sink", "towel"}
+    WASH_ROOM_ALLOWED_FURNITURE = {"washbasin", "sink", "towel", "washing_machine"}
     CLOSET_ALLOWED_FURNITURE = {"wardrobe", "shelf"}
     CIRCULATION_ALLOWED_FURNITURE = {"potted_plant"}
     DIRECT_ROLE_MAP = {

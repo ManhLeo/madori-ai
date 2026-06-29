@@ -41,7 +41,9 @@ class PromptPackageService:
         "Do not turn both western-style rooms into bedrooms.",
         "Keep the dining table in the main living/dining area.",
         "Keep sofa and TV in the assigned western-style media/lounge room when that role is present.",
-        "Keep the other assigned western-style room as the bedroom."
+        "Keep the other assigned western-style room as the bedroom.",
+        "Do not render walls, partitions, wet-area blocks, or dividers as large black or dark charcoal filled masses.",
+        "Do not place the washing machine outside the Wash Room at the Wash / 洗 mark.",
     ]
 
     def __init__(self, storage_dir: Path, storage_runs_dir: Path) -> None:
@@ -178,7 +180,9 @@ class PromptPackageService:
             "Create a watercolor-style illustrated floorplan. "
             "Preserve exact room geometry, wall positions, doors, windows, and balcony. "
             "Use English labels only. Follow the validated render plan. "
-            "Do not invent or rearrange structure."
+            "Do not invent or rearrange structure. "
+            "Use a bright, airy Japanese watercolor floorplan style with light warm beige, soft greige, pale wood, and neutral tones. "
+            "Use light neutral wall tones with thin outlines, not heavy dark wall fills."
         )
 
     def build_primary_generation_prompt(self, render_plan: RenderPlanArtifact) -> str:
@@ -207,7 +211,12 @@ class PromptPackageService:
             "Treat pillow and blanket as bedding details rather than large standalone furniture. "
             "Treat sink, stove, and cabinet as compact kitchen details that may integrate with the kitchen counter. "
             "Treat shower and towel as compact bath details rather than large standalone furniture. "
-            "Avoid over-cluttering small rooms."
+            "Avoid over-cluttering small rooms. "
+            "Orient furniture naturally according to room geometry. "
+            "TV should face the sofa. Coffee table should sit between sofa and TV when possible. "
+            "Beds should align naturally to room walls with headboards against a wall. "
+            "Dining table and chairs should align neatly and should not block circulation. "
+            "The washing machine must be placed in the Wash Room at the location marked Wash / 洗 and nowhere else."
         )
 
     def build_structure_lock_prompt(self, render_plan: RenderPlanArtifact) -> str:
@@ -220,6 +229,8 @@ class PromptPackageService:
                 "Do not change room proportions.",
                 "Do not add or remove rooms.",
                 "Preserve source layout exactly.",
+                "Keep wet areas and fixture locations in the same rooms.",
+                "Keep the washing machine in the Wash Room at the Wash / 洗 location.",
             ]
         )
 
@@ -267,6 +278,8 @@ class PromptPackageService:
             lines.append("- guidance: avoid over-cluttering small rooms; keep semantic detail objects subtle and integrated.")
             lines.append("- role guidance: dining table belongs in the main living/dining area, not in the bedroom.")
             lines.append("- role guidance: when a media_lounge room exists, place sofa, TV, TV stand, and coffee table there instead of treating both western-style rooms as bedrooms.")
+            lines.append("- orientation guidance: orient furniture naturally; TV faces sofa, coffee table between them when possible, beds align to walls, dining furniture aligns neatly.")
+            lines.append("- wash guidance: washing machine belongs only in Wash Room at the Wash / 洗 mark.")
         return "\n".join(lines)
 
     def build_label_prompt(self, render_plan: RenderPlanArtifact) -> str:
@@ -285,7 +298,10 @@ class PromptPackageService:
         acceptable = "; ".join(style.get("acceptable_cues") or [])
         avoid = "; ".join(style.get("avoid_cues") or [])
         return (
-            "Use soft watercolor style with translucent washes and clean thin linework. "
+            "Use a bright, airy Japanese watercolor floorplan style with translucent washes and clean thin linework. "
+            "Prefer light warm beige, soft greige, pale wood, and neutral tones. "
+            "Avoid heavy dark color masses. "
+            "Do not render walls, room dividers, wet-area blocks, or partitions as large black or dark charcoal filled areas. Use light neutral wall tones with thin outlines where needed. "
             f"Floor tone: {palette.get('floor_tone') or 'unspecified'}. "
             "Avoid flat digital fills, oversaturated colors, and cartoon-like furniture. "
             f"Positive cues: {positive or 'none'}. "

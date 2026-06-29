@@ -1010,6 +1010,7 @@ select {
 }
 
 .result-url {
+  display: inline-block;
   max-width: 100%;
   margin-top: 8px;
   color: var(--primary);
@@ -1017,6 +1018,120 @@ select {
   font-size: 12px;
   font-weight: 800;
   overflow-wrap: anywhere;
+}
+
+.result-action-panel,
+.final-output-panel {
+  margin-top: 18px;
+}
+
+.result-action-panel {
+  padding: 18px;
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  background: rgba(255, 250, 243, 0.82);
+}
+
+.result-action-panel[hidden],
+.final-output-panel[hidden] {
+  display: none;
+}
+
+.result-action-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+}
+
+.result-action-header h3 {
+  margin: 6px 0 0;
+  font-size: 18px;
+}
+
+.result-action-status {
+  min-height: 18px;
+  margin: 0;
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 800;
+  text-align: right;
+}
+
+.result-action-status.is-error {
+  color: #a13b12;
+}
+
+.result-action-buttons {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  margin-top: 16px;
+}
+
+.feedback-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px 14px;
+  margin-top: 16px;
+}
+
+.feedback-option {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  min-height: 40px;
+  padding: 10px 12px;
+  border: 1px solid rgba(234, 223, 206, 0.9);
+  border-radius: 10px;
+  background: rgba(255, 253, 248, 0.86);
+  color: var(--text);
+  font-size: 13px;
+  font-weight: 750;
+}
+
+.feedback-option input {
+  margin-top: 2px;
+  flex: 0 0 auto;
+}
+
+.feedback-notes {
+  display: grid;
+  gap: 8px;
+  margin-top: 16px;
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 850;
+}
+
+.feedback-notes textarea {
+  width: 100%;
+  min-height: 110px;
+  resize: vertical;
+  padding: 12px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: #fffdf8;
+  color: var(--text);
+  font: inherit;
+  line-height: 1.6;
+}
+
+.feedback-plan-summary {
+  margin: 14px 0 0;
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 750;
+  line-height: 1.7;
+}
+
+.result-action-buttons .secondary-button,
+.result-action-buttons .download-button {
+  margin-top: 0;
+}
+
+.final-output-panel .result-meta {
+  min-height: 18px;
 }
 
 .quality-summary {
@@ -1578,6 +1693,18 @@ select {
   .quality-summary-list,
   .layout-lock-preview-images,
   .debug-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .result-action-header {
+    display: grid;
+  }
+
+  .result-action-status {
+    text-align: left;
+  }
+
+  .feedback-grid {
     grid-template-columns: 1fr;
   }
 

@@ -73,12 +73,12 @@ class FloorplanAnalysisValidationService:
         normalized_analysis = self.vision_analyzer.normalize_floorplan_analysis(raw_analysis)
         rooms = self._normalize_rooms(normalized_analysis.rooms)
         room_id_by_type = self._build_room_id_index(rooms)
-        fixtures = self._derive_fixtures(rooms)
+        fixtures = self._derive_fixtures(rooms, normalized_analysis.model_dump(mode="json"))
         doors = self._normalize_doors(normalized_analysis, room_id_by_type)
         windows = self._normalize_windows(normalized_analysis, room_id_by_type)
         labels = self._normalize_labels(rooms)
         dimensions = self._normalize_dimensions(rooms)
-        warnings = self._build_warnings(normalized_analysis, rooms, doors, windows, dimensions)
+        warnings = self._build_warnings(normalized_analysis, rooms, fixtures, doors, windows, dimensions)
         errors: list[str] = []
         checks = self._build_checks(rooms, labels, errors)
         quality_summary = self._build_quality_summary(rooms, fixtures, doors, windows, labels, dimensions)
@@ -157,7 +157,7 @@ class FloorplanAnalysisValidationService:
             index.setdefault(room.type, []).append(room.id)
         return index
 
-    def _derive_fixtures(self, rooms: list[ValidatedRoomRecord]) -> list[ValidatedFixtureRecord]:
+    def _derive_fixtures(self, rooms: list[ValidatedRoomRecord], normalized_analysis: dict | None = None) -> list[ValidatedFixtureRecord]:
         fixtures: list[ValidatedFixtureRecord] = []
         for room in rooms:
             if room.type not in self.FIXTURE_ROOM_TYPES:
@@ -166,9 +166,11 @@ class FloorplanAnalysisValidationService:
                 ValidatedFixtureRecord(
                     id=f"fixture_{len(fixtures) + 1:03d}",
                     type=room.type,
+                    fixture_type=room.type,
                     approved_label=self.APPROVED_LABEL_MAP.get(room.type, "Unknown"),
                     source_room_id=room.id,
                     source_room_type=room.type,
+                    room_type=room.type,
                     position=room.position,
                     bbox=room.bbox,
                     approx_bbox=room.approx_bbox,
@@ -178,7 +180,52 @@ class FloorplanAnalysisValidationService:
                     geometry_notes=list(room.geometry_notes or []),
                 )
             )
+        wash_anchor = self._build_washing_machine_anchor(rooms, normalized_analysis or {})
+        if wash_anchor is not None:
+            fixtures.append(wash_anchor)
         return fixtures
+
+    def _build_washing_machine_anchor(
+        self,
+        rooms: list[ValidatedRoomRecord],
+        normalized_analysis: dict,
+    ) -> ValidatedFixtureRecord | None:
+        wash_room = next((room for room in rooms if room.type == "washroom"), None)
+        labels = normalized_analysis.get("labels") if isinstance(normalized_analysis, dict) else []
+        has_wash_label = False
+        for label in labels if isinstance(labels, list) else []:
+            if not isinstance(label, dict):
+                continue
+            source_text = str(label.get("text") or label.get("source_text") or "").strip().lower()
+            english_text = str(label.get("english") or "").strip().lower()
+            if source_text in {"洗", "wash"} or english_text == "wash":
+                has_wash_label = True
+                break
+        if not has_wash_label and wash_room is None:
+            return None
+        geometry_notes: list[str] = ["Semantic wash fixture anchor only; not CAD-accurate."]
+        bbox = wash_room.bbox if wash_room is not None else None
+        approx_bbox = wash_room.approx_bbox if wash_room is not None else None
+        if bbox is None:
+            geometry_notes.append("Wash anchor bbox is approximate or missing.")
+        return ValidatedFixtureRecord(
+            id="fixture_washing_machine_anchor_001",
+            type="washing_machine_anchor",
+            fixture_type="washing_machine_anchor",
+            approved_label="Wash Room",
+            source_room_id=wash_room.id if wash_room is not None else None,
+            source_room_type=wash_room.type if wash_room is not None else "washroom",
+            room_type="washroom",
+            required=True,
+            source_label="洗" if has_wash_label else "Wash",
+            position=wash_room.position if wash_room is not None else None,
+            bbox=bbox,
+            approx_bbox=approx_bbox,
+            polygon=wash_room.polygon if wash_room is not None else None,
+            confidence=wash_room.confidence if wash_room is not None else 0.6,
+            geometry_confidence=wash_room.geometry_confidence if wash_room is not None else 0.2,
+            geometry_notes=geometry_notes,
+        )
 
     def _normalize_doors(
         self,
@@ -289,6 +336,7 @@ class FloorplanAnalysisValidationService:
         self,
         analysis: FloorplanAnalysis,
         rooms: list[ValidatedRoomRecord],
+        fixtures: list[ValidatedFixtureRecord],
         doors: list[ValidatedDoorRecord],
         windows: list[ValidatedWindowRecord],
         dimensions: list[ValidatedDimensionRecord],
@@ -304,6 +352,8 @@ class FloorplanAnalysisValidationService:
             warnings.append("Some room dimensions are missing or could not be parsed deterministically.")
         if any(room.bbox is None for room in rooms):
             warnings.append("Some rooms are missing approximate geometry and will require manual review before safe furniture placement.")
+        if any(fixture.type == "washing_machine_anchor" and fixture.bbox is None for fixture in fixtures):
+            warnings.append("Wash / 洗 was detected but the washing_machine_anchor bbox is approximate or missing.")
         if analysis.balcony and analysis.balcony.exists and analysis.balcony.position == "unknown":
             warnings.append("Balcony presence was detected but its position is still unknown.")
         return warnings

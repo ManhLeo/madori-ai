@@ -20,6 +20,7 @@ def main() -> int:
         "OPENAI_ANALYSIS_MODEL": settings.openai_analysis_model,
         "OPENAI_ANALYSIS_TIMEOUT_SECONDS": settings.openai_analysis_timeout_seconds,
         "OPENAI_ANALYSIS_MAX_OUTPUT_TOKENS": settings.openai_analysis_max_output_tokens,
+        "OPENAI_ANALYSIS_JSON_RETRY_ATTEMPTS": settings.openai_analysis_json_retry_attempts,
         "OPENAI_API_KEY_exists": bool(settings.openai_api_key),
         "GEMINI_MODEL": settings.gemini_model,
         "GEMINI_API_KEY_exists": bool(settings.gemini_api_key),

@@ -35,6 +35,7 @@ class FurniturePlacementValidationService:
         "sink",
         "stove",
         "cabinet",
+        "washing_machine",
         "bathtub",
         "shower",
         "towel",
@@ -302,6 +303,10 @@ class FurniturePlacementValidationService:
 
         if furniture.type in {"dining_table", "chair"} and getattr(room, "type", None) == "living_room":
             warnings.append("Dining furniture mapped to living_room because no dining_kitchen room was available.")
+        if furniture.type == "washing_machine" and getattr(room, "type", None) not in {"wash_area", "wash_room", "washroom"}:
+            errors.append(f"Furniture {furniture.id}: washing_machine must stay in Wash Room.")
+            placement_status = "invalid"
+            update["placement_status"] = "invalid"
 
         if placement_status == "suppressed_by_functional_role":
             note = "Suppressed by functional role cleanup; skipped during placement validation."

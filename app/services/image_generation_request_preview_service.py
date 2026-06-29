@@ -454,14 +454,19 @@ class ImageGenerationRequestPreviewService:
         color_cues = ", ".join(self._filter_unknown(summary.get("color_cues") or [])) or "none"
         lines = [
             "Preserve the exact layout from normalized_floorplan.png.",
+            "Preserve walls, doors, windows, balcony, room positions, and wet areas exactly.",
             "Use English labels only.",
             "Use selected interior references only for furniture type, color, and style.",
             "Simplify or omit furniture if it conflicts with the layout.",
             "Apply furniture arrangement only when it does not conflict with the floorplan.",
+            "Use a bright, airy Japanese watercolor floorplan style. Prefer light warm beige, soft greige, pale wood, and neutral tones. Avoid heavy dark color masses.",
+            "Do not render walls, room dividers, wet-area blocks, or partitions as large black or dark charcoal filled areas. Use light neutral wall tones with clean thin outlines where needed.",
             "Living Room arrangement: if sofa and TV are both present and the floorplan allows, arrange them facing each other with a coffee table between them.",
             "Keep sofa, TV, and coffee table inside the Living Room.",
             "If the room is too small or the layout does not allow the arrangement, simplify or omit furniture rather than changing the floorplan.",
             "Bedroom guidance: the Bed Room must contain either one bed or two single beds only. Do not draw more than two beds. Do not draw bunk beds unless the selected bedroom reference clearly shows bunk beds. If the selected bedroom reference shows two separate beds, draw two single beds. If the selected bedroom reference is unclear, draw one simple bed. Keep bed(s) inside the Bed Room only. Do not resize the Bed Room or move walls, doors, or windows to fit beds. If there is not enough space, simplify the bed drawing rather than changing the floorplan.",
+            "Orient furniture naturally according to room geometry. TV should face the sofa. Coffee table should be between sofa and TV when possible. Beds should align naturally to room walls with headboards against a wall. Dining table and chairs should align neatly and should not block circulation.",
+                    "The washing machine must be placed in the Wash Room at the location marked Wash / 洗. Do not place the washing machine in Kitchen, Living Room, Bed Room, Bath Room, Toilet, or Entrance.",
         ]
         lines.extend(room_function_guidance)
         lines.extend(
@@ -848,7 +853,7 @@ class ImageGenerationRequestPreviewService:
         if interior_analysis_validated is None:
             return {
                 "floor_tone": "unknown",
-                "summary": "Interior guidance: The living room should include a sofa, TV/TV stand, and coffee table arranged neatly, ideally with the sofa and TV facing each other. The bedroom should only have one or two single beds, bedding colors inspired by the selected bedroom reference. Use soft, neutral colors. Furniture is secondary to maintaining the exact layout.",
+                "summary": "Interior guidance: Living Room should include a sofa, TV/TV stand, and coffee table arranged compactly, with sofa and TV facing each other when possible. Bed Room should contain only one bed or two single beds with light bedding. Keep Kitchen, Bath Room, Toilet, and Wash Room compact and simple. Use a bright airy Japanese watercolor palette with light warm neutral wall tones. Place the washing machine only in Wash Room at Wash / 洗. Furniture is secondary to exact layout preservation.",
                 "room_summary": [],
                 "style_cues": [],
                 "color_cues": [],
@@ -871,7 +876,7 @@ class ImageGenerationRequestPreviewService:
             style_cues.append("kitchen_reference")
         if any(room in selected_rooms for room in {"bath_room", "toilet", "wash_room"}):
             style_cues.append("wet_area_reference")
-        summary_text = "Interior guidance: Living Room should include a sofa, TV/TV stand, and coffee table arranged compactly, with sofa and TV facing each other when possible. Bed Room should contain only one bed or two single beds with light bedding. Keep Kitchen/Bath/Toilet/Wash compact and simple. Use soft neutral watercolor colors. Furniture is secondary to exact layout preservation."
+        summary_text = "Interior guidance: Living Room should include a sofa, TV/TV stand, and coffee table arranged compactly, with sofa and TV facing each other when possible. Bed Room should contain only one bed or two single beds with light bedding. Keep Kitchen, Bath Room, Toilet, and Wash Room compact and simple. Use a bright airy Japanese watercolor palette with light warm neutral wall tones. Place the washing machine only in Wash Room at Wash / 洗. Furniture is secondary to exact layout preservation."
         return {
             "floor_tone": floor_tone,
             "summary": summary_text,
@@ -891,7 +896,7 @@ class ImageGenerationRequestPreviewService:
         if "kitchen" in rooms:
             lines.append("Kitchen: keep compact with sink, stove, and counter cues only.")
         if any(room in rooms for room in {"bath_room", "toilet", "wash_room"}):
-            lines.append("Bath/Toilet/Wash: keep simple and avoid over-detail unless selected references clearly show them.")
+            lines.append("Bath Room, Toilet, and Wash Room: keep simple and avoid over-detail unless selected references clearly show them.")
         return lines
 
     def _selected_room_hints(self, selected_interior_photos: list[dict]) -> list[str]:

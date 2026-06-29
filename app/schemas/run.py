@@ -188,6 +188,10 @@ class ValidatedFixtureRecord(BaseModel):
     approved_label: str
     source_room_id: str | None = None
     source_room_type: str | None = None
+    fixture_type: str | None = None
+    room_type: str | None = None
+    required: bool = False
+    source_label: str | None = None
     position: str | None = None
     bbox: "LayoutBoundingBox | None" = None
     approx_bbox: "LayoutBoundingBox | None" = None
@@ -589,6 +593,13 @@ class LayoutFurnitureObject(BaseModel):
     suppression_reason: str | None = None
     render_action: str | None = None
     prompt_action: str | None = None
+    orientation: str | None = None
+    facing_to: str | None = None
+    orientation_rule: str | None = None
+    aligned_to: str | None = None
+    headboard_against_wall: bool | None = None
+    required_by_fixture_anchor: bool = False
+    anchor_fixture_id: str | None = None
     target_room_bbox: LayoutBoundingBox | None = None
     room_geometry_confidence: float = 0.0
     x: int | None = None
@@ -820,7 +831,7 @@ class ImageGenerationRequestPreviewQualitySummary(BaseModel):
 class ImageGenerationRequestPreviewSummary(BaseModel):
     preview_status: str = "failed"
     provider_name: str = "openai"
-    model: str = "gpt-image-1"
+    model: str = "gpt-image-2"
     request_will_be_sent: bool = False
     api_call_performed: bool = False
     requires_manual_approval: bool = True
@@ -847,13 +858,53 @@ class ImageGenerationDraftRequest(BaseModel):
 class ImageGenerationDraftSummary(BaseModel):
     draft_status: str = "failed"
     provider_name: str = "openai"
-    model: str = "gpt-image-1"
+    model: str = "gpt-image-2"
     api_call_performed: bool = False
     provider_size: str = "1024x1024"
     final_delivery_size: str = "1200x1200"
     draft_image_preview_url: str | None = None
     needs_human_review: bool = True
     ready_for_visual_qa: bool = False
+    warnings_count: int = 0
+    errors_count: int = 0
+
+
+class FinalizeOutputRequest(BaseModel):
+    force: bool = False
+    source: str = "auto"
+
+
+class FinalOutputSummary(BaseModel):
+    final_status: str = "failed"
+    final_image_preview_url: str | None = None
+    public_output_url: str | None = None
+    width: int = 0
+    height: int = 0
+    qa_status: str | None = None
+    cloudinary_enabled: bool = False
+    cloudinary_uploaded: bool = False
+    warnings_count: int = 0
+    errors_count: int = 0
+
+
+class RegenerateWithFeedbackRequest(BaseModel):
+    confirm_generation: bool = False
+    feedback_source: str = "latest"
+    qa_feedback_path: str | None = None
+    use_reference_images: bool = True
+    max_reference_images: int = 4
+    output_format: str = "png"
+    provider: str = "openai"
+
+
+class RegenerationSummary(BaseModel):
+    latest_attempt: int = 0
+    status: str = "failed"
+    issues_count: int = 0
+    highest_severity: str = "low"
+    output_preview_url: str | None = None
+    public_output_url: str | None = None
+    cloudinary_uploaded: bool = False
     warnings_count: int = 0
     errors_count: int = 0
 
@@ -990,6 +1041,7 @@ class ImageGenerationDraftArtifact(BaseModel):
     interior_reference_count: int = 0
     selected_interior_filenames: list[str] = Field(default_factory=list)
     interior_guidance_summary: dict = Field(default_factory=dict)
+    openai_image_attempts: list[dict] = Field(default_factory=list)
     openai_input_images: list[dict] = Field(default_factory=list)
     cloudinary: dict = Field(default_factory=dict)
     public_output_url: str | None = None
@@ -1027,6 +1079,118 @@ class StructureLockedCompositeArtifact(BaseModel):
     errors: list[str] = Field(default_factory=list)
 
 
+class VisualQAIssue(BaseModel):
+    issue_type: str
+    severity: str
+    description: str | None = None
+
+
+class VisualQARequest(BaseModel):
+    qa_status: str
+    layout_preserved: str
+    english_labels_correct: str
+    room_roles_correct: str
+    furniture_arrangement_correct: str
+    bedroom_bed_count_correct: str
+    dining_location_correct: str
+    sofa_tv_arrangement_correct: str
+    final_usable_for_demo: bool
+    notes: str | None = None
+    issues: list[VisualQAIssue] = Field(default_factory=list)
+
+
+class VisualQASummary(BaseModel):
+    qa_status: str = "needs_fix"
+    final_usable_for_demo: bool = False
+    issues_count: int = 0
+    warnings_count: int = 0
+    errors_count: int = 0
+
+
+class QAFeedbackIssue(BaseModel):
+    issue_type: str
+    severity: str
+    description: str | None = None
+    correction_instruction: str | None = None
+
+
+class QAFeedbackRequest(BaseModel):
+    feedback_status: str
+    target_image: str
+    target_image_path: str | None = None
+    issues: list[QAFeedbackIssue] = Field(default_factory=list)
+    freeform_feedback: str | None = None
+
+
+class QAFeedbackSummary(BaseModel):
+    feedback_status: str = "needs_regeneration"
+    issues_count: int = 0
+    highest_severity: str = "low"
+    correction_plan_status: str = "created"
+
+
+class QAFeedbackResponse(BaseModel):
+    schema_version: str = "qa_feedback.v1"
+    run_id: str
+    generated_at: datetime
+    feedback_status: str
+    target_image: dict = Field(default_factory=dict)
+    issues: list[QAFeedbackIssue] = Field(default_factory=list)
+    freeform_feedback: str | None = None
+    correction_plan: dict = Field(default_factory=dict)
+    warnings: list[str] = Field(default_factory=list)
+    errors: list[str] = Field(default_factory=list)
+
+
+class VisualQAReportResponse(BaseModel):
+    schema_version: str = "visual_qa_report.v1"
+    run_id: str
+    generated_at: datetime
+    qa_status: str
+    source_draft: dict = Field(default_factory=dict)
+    checks: dict[str, str] = Field(default_factory=dict)
+    final_usable_for_demo: bool = False
+    notes: str | None = None
+    issues: list[VisualQAIssue] = Field(default_factory=list)
+    warnings: list[str] = Field(default_factory=list)
+    errors: list[str] = Field(default_factory=list)
+
+
+class FinalOutputResponse(BaseModel):
+    schema_version: str = "final_output.v1"
+    run_id: str
+    generated_at: datetime
+    final_status: str = "finalized"
+    source: dict = Field(default_factory=dict)
+    final: dict = Field(default_factory=dict)
+    qa: dict = Field(default_factory=dict)
+    generation: dict = Field(default_factory=dict)
+    cloudinary: dict = Field(default_factory=dict)
+    warnings: list[str] = Field(default_factory=list)
+    errors: list[str] = Field(default_factory=list)
+
+
+class RegenerationAttemptResponse(BaseModel):
+    schema_version: str = "regeneration_attempt.v1"
+    run_id: str
+    generated_at: datetime
+    attempt: int
+    status: str = "failed"
+    provider: str = "openai"
+    model: str | None = None
+    prompt_mode: str = "strict_layout_with_feedback"
+    source_feedback: dict = Field(default_factory=dict)
+    correction_guidance_used: list[str] = Field(default_factory=list)
+    negative_guidance_used: list[str] = Field(default_factory=list)
+    prompt: dict = Field(default_factory=dict)
+    openai_image_attempts: list[dict] = Field(default_factory=list)
+    openai_input_images: list[dict] = Field(default_factory=list)
+    outputs: dict = Field(default_factory=dict)
+    cloudinary: dict = Field(default_factory=dict)
+    warnings: list[str] = Field(default_factory=list)
+    errors: list[str] = Field(default_factory=list)
+
+
 class LayoutValidationArtifact(BaseModel):
     schema_version: str = "layout_validated.v1"
     run_id: str
@@ -1056,6 +1220,7 @@ class ArtifactIndexEntry(BaseModel):
     relative_path: str
     preview_url: str | None = None
     external_url: str | None = None
+    public_output_url: str | None = None
     cloudinary_secure_url: str | None = None
     size_bytes: int | None = None
     content_type: str | None = None
@@ -1128,6 +1293,11 @@ class RunMetadataSummary(BaseModel):
     run_id: str
     generated_at: datetime
     artifact_index_path: str | None = None
+    visual_qa_report_path: str | None = None
+    qa_feedback_path: str | None = None
+    final_output_path: str | None = None
+    latest_regeneration_path: str | None = None
+    public_output_url: str | None = None
     artifacts: list[ArtifactIndexEntry] = Field(default_factory=list)
     input_summary: InputSummary | None = None
     pipeline_summary: PipelineSummary
@@ -1144,6 +1314,10 @@ class RunMetadataSummary(BaseModel):
     image_generation_request_preview_summary: ImageGenerationRequestPreviewSummary | None = None
     image_generation_draft_summary: ImageGenerationDraftSummary | None = None
     structure_locked_composite_summary: StructureLockedCompositeSummary | None = None
+    visual_qa_summary: VisualQASummary | None = None
+    qa_feedback_summary: QAFeedbackSummary | None = None
+    final_output_summary: FinalOutputSummary | None = None
+    regeneration_summary: RegenerationSummary | None = None
     warnings: list[str] = Field(default_factory=list)
     errors: list[str] = Field(default_factory=list)
 
@@ -1165,6 +1339,10 @@ class ProcessingFlags(BaseModel):
     image_generation_request_preview: bool = False
     image_generation_draft: bool = False
     structure_locked_composite_rendering: bool = False
+    visual_qa: bool = False
+    qa_feedback: bool = False
+    final_output: bool = False
+    regeneration_with_feedback: bool = False
     ai_analysis: bool = False
     ocr: bool = False
     image_generation: bool = False
@@ -1227,6 +1405,14 @@ class RunMetadata(BaseModel):
     public_output_url: str | None = None
     structure_locked_composite_path: str | None = None
     structure_locked_composite_summary: StructureLockedCompositeSummary | None = None
+    visual_qa_report_path: str | None = None
+    visual_qa_summary: VisualQASummary | None = None
+    qa_feedback_path: str | None = None
+    qa_feedback_summary: QAFeedbackSummary | None = None
+    final_output_path: str | None = None
+    final_output_summary: FinalOutputSummary | None = None
+    latest_regeneration_path: str | None = None
+    regeneration_summary: RegenerationSummary | None = None
     last_indexed_at: datetime | None = None
     metadata_path: str
 

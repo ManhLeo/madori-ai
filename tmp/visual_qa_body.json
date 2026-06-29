@@ -1,0 +1,13 @@
+﻿{
+  "qa_status": "passed",
+  "layout_preserved": "pass",
+  "english_labels_correct": "pass",
+  "room_roles_correct": "pass",
+  "furniture_arrangement_correct": "pass",
+  "bedroom_bed_count_correct": "pass",
+  "dining_location_correct": "pass",
+  "sofa_tv_arrangement_correct": "pass",
+  "final_usable_for_demo": true,
+  "notes": "Manual QA passed from frontend smoke.",
+  "issues": []
+}

@@ -1,0 +1,7 @@
+﻿{
+  "confirm_generation": true,
+  "feedback_source": "latest",
+  "use_reference_images": true,
+  "max_reference_images": 4,
+  "output_format": "png"
+}

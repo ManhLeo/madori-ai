@@ -5,6 +5,7 @@ import json
 from contextlib import ExitStack
 from datetime import datetime, timezone
 from pathlib import Path
+import time
 
 import requests
 from fastapi import HTTPException
@@ -60,12 +61,24 @@ class ImageGenerationDraftService:
         )
         openai_input_images, input_warnings = self.validate_openai_input_images(selected_reference_files)
         payload = self.build_openai_image_request(preview, request, metadata)
-        provider_response, provider_warnings = self.call_openai_image_api(
-            payload,
-            selected_reference_images,
-            openai_input_images,
-            structure_reference_path,
-        )
+        try:
+            provider_response, provider_warnings, openai_image_attempts = self.call_openai_image_api(
+                payload,
+                selected_reference_images,
+                openai_input_images,
+                structure_reference_path,
+            )
+        except HTTPException as exc:
+            if self._is_retryable_openai_image_http_exception(exc):
+                self._write_failed_image_generation_draft_artifact(
+                    metadata.run_id,
+                    preview,
+                    payload,
+                    selected_reference_images,
+                    openai_input_images,
+                    exc,
+                )
+            raise
         output_info, output_warnings = self.decode_and_save_generated_image(metadata.run_id, provider_response, preview)
         cloudinary_info, cloudinary_warnings = self.upload_output_images_to_cloudinary(metadata.run_id, output_info)
 
@@ -95,6 +108,7 @@ class ImageGenerationDraftService:
             [],
             selected_reference_images,
             openai_input_images,
+            openai_image_attempts,
             draft_status,
         )
         self.write_image_generation_draft(metadata.run_id, artifact)
@@ -205,14 +219,19 @@ class ImageGenerationDraftService:
             return "\n".join(
                 [
                     "Preserve the exact layout from normalized_floorplan.png.",
+                    "Preserve walls, doors, windows, balcony, room positions, and wet areas exactly.",
                     "Use English labels only.",
                     "Use selected interior references only for furniture type, color, and style.",
                     "Simplify or omit furniture if it conflicts with the layout.",
                     "Apply furniture arrangement only when it does not conflict with the floorplan.",
+                    "Use a bright, airy Japanese watercolor floorplan style. Prefer light warm beige, soft greige, pale wood, and neutral tones. Avoid heavy dark color masses.",
+                    "Do not render walls, room dividers, wet-area blocks, or partitions as large black or dark charcoal filled areas. Use light neutral wall tones with clean thin outlines where needed.",
                     "Living Room arrangement: if sofa and TV are both present and the floorplan allows, arrange them facing each other with a coffee table between them.",
                     "Keep sofa, TV, and coffee table inside the Living Room.",
                     "If the room is too small or the layout does not allow the arrangement, simplify or omit furniture rather than changing the floorplan.",
                     "Bedroom guidance: the Bed Room must contain either one bed or two single beds only. Do not draw more than two beds. Do not draw bunk beds unless the selected bedroom reference clearly shows bunk beds. If the selected bedroom reference shows two separate beds, draw two single beds. If the selected bedroom reference is unclear, draw one simple bed. Keep bed(s) inside the Bed Room only. Do not resize the Bed Room or move walls, doors, or windows to fit beds. If there is not enough space, simplify the bed drawing rather than changing the floorplan.",
+                    "Orient furniture naturally according to room geometry. TV should face the sofa. Coffee table should be between sofa and TV when possible. Beds should align naturally to room walls with headboards against a wall. Dining table and chairs should align neatly and should not block circulation.",
+                    "The washing machine must be placed in the Wash Room at the location marked Wash / 洗. Do not place the washing machine in Kitchen, Living Room, Bed Room, Bath Room, Toilet, or Entrance.",
                     f"Interior summary: {summary.get('summary') or 'none'}.",
                     f"Floor tone: {floor_tone}.",
                     f"Interior room guidance: {room_summary}.",
@@ -327,7 +346,7 @@ class ImageGenerationDraftService:
         selected_images: list[dict],
         selected_image_files: list[dict],
         structure_reference_path: Path | None,
-    ) -> tuple[dict, list[str]]:
+    ) -> tuple[dict, list[str], list[dict]]:
         warnings: list[str] = []
         if structure_reference_path is not None:
             if not selected_image_files:
@@ -335,13 +354,35 @@ class ImageGenerationDraftService:
                     status_code=501,
                     detail="Image reference input is required; prompt-only generation is disabled for layout-preserving floorplans.",
                 )
-            return self._call_openai_image_edit_api(payload, selected_image_files), warnings
+            provider_response, retry_warnings, attempts = self._run_openai_image_request_with_retry(
+                request_kind="edit",
+                request_fn=lambda attempt_timeout: self._call_openai_image_edit_api_once(
+                    payload,
+                    selected_image_files,
+                    attempt_timeout,
+                ),
+                input_images=selected_image_files,
+            )
+            warnings.extend(retry_warnings)
+            return provider_response, warnings, attempts
         if selected_images and not self.settings.openai_image_allow_prompt_only:
             raise HTTPException(
                 status_code=501,
                 detail="Image reference input is required; prompt-only generation is disabled for layout-preserving floorplans.",
             )
 
+        provider_response, retry_warnings, attempts = self._run_openai_image_request_with_retry(
+            request_kind="generation",
+            request_fn=lambda attempt_timeout: self._call_openai_image_generation_api_once(
+                payload,
+                attempt_timeout,
+            ),
+            input_images=selected_images,
+        )
+        warnings.extend(retry_warnings)
+        return provider_response, warnings, attempts
+
+    def _call_openai_image_generation_api_once(self, payload: dict, timeout_seconds: int) -> dict:
         try:
             response = requests.post(
                 "https://api.openai.com/v1/images/generations",
@@ -349,23 +390,26 @@ class ImageGenerationDraftService:
                     "Authorization": f"Bearer {self.settings.openai_api_key}",
                 },
                 json=payload,
-                timeout=120,
+                timeout=timeout_seconds,
             )
         except requests.RequestException as exc:
-            raise HTTPException(status_code=502, detail=f"OpenAI image generation request failed: {exc.__class__.__name__}") from exc
+            if self._is_retryable_openai_image_exception(exc):
+                raise
+            raise HTTPException(
+                status_code=502,
+                detail=f"OpenAI image generation request failed: {exc.__class__.__name__}",
+            ) from exc
 
         if response.status_code >= 400:
             safe_detail = self._extract_safe_provider_error(response)
             raise HTTPException(status_code=502, detail=f"OpenAI image generation failed: {safe_detail}")
 
         try:
-            provider_response = response.json()
+            return response.json()
         except ValueError as exc:
             raise HTTPException(status_code=502, detail="invalid OpenAI image generation response") from exc
 
-        return provider_response, warnings
-
-    def _call_openai_image_edit_api(self, payload: dict, selected_image_files: list[dict]) -> dict:
+    def _call_openai_image_edit_api_once(self, payload: dict, selected_image_files: list[dict], timeout_seconds: int) -> dict:
         form_data = {
             "model": payload["model"],
             "prompt": payload["prompt"],
@@ -400,10 +444,15 @@ class ImageGenerationDraftService:
                     },
                     data=form_data,
                     files=multipart_files,
-                    timeout=120,
+                    timeout=timeout_seconds,
                 )
         except requests.RequestException as exc:
-            raise HTTPException(status_code=502, detail=f"OpenAI image edit request failed: {exc.__class__.__name__}") from exc
+            if self._is_retryable_openai_image_exception(exc):
+                raise
+            raise HTTPException(
+                status_code=502,
+                detail=f"OpenAI image edit request failed: {exc.__class__.__name__}",
+            ) from exc
         except OSError as exc:
             raise HTTPException(status_code=400, detail=f"failed to open reference image for provider request: {exc}") from exc
 
@@ -420,6 +469,175 @@ class ImageGenerationDraftService:
             return response.json()
         except ValueError as exc:
             raise HTTPException(status_code=502, detail="invalid OpenAI image generation response") from exc
+
+    def _run_openai_image_request_with_retry(
+        self,
+        *,
+        request_kind: str,
+        request_fn,
+        input_images: list[dict],
+    ) -> tuple[dict, list[str], list[dict]]:
+        timeout_seconds = max(1, int(self.settings.openai_image_timeout_seconds))
+        max_attempts = max(1, int(self.settings.openai_image_retry_attempts))
+        delay_seconds = max(0, int(self.settings.openai_image_retry_delay_seconds))
+        attempts: list[dict] = []
+        warnings: list[str] = []
+
+        for attempt in range(1, max_attempts + 1):
+            try:
+                provider_response = request_fn(timeout_seconds)
+                attempts.append(
+                    self._build_openai_image_attempt_record(
+                        attempt=attempt,
+                        status="completed",
+                        timeout_seconds=timeout_seconds,
+                        input_images=input_images,
+                    )
+                )
+                return provider_response, warnings, attempts
+            except HTTPException as exc:
+                if not self._is_retryable_openai_image_http_exception(exc) or attempt >= max_attempts:
+                    if self._is_retryable_openai_image_http_exception(exc):
+                        attempts.append(
+                            self._build_openai_image_attempt_record(
+                                attempt=attempt,
+                                status="failed",
+                                timeout_seconds=timeout_seconds,
+                                input_images=input_images,
+                                error_type="openai_image_timeout",
+                                message="OpenAI image generation timed out after retry attempts.",
+                            )
+                        )
+                        raise HTTPException(
+                            status_code=504,
+                            detail={
+                                "error": "openai_image_timeout",
+                                "message": "OpenAI image generation timed out after retry attempts.",
+                                "details": {
+                                    "attempts": len(attempts),
+                                    "timeout_seconds": timeout_seconds,
+                                },
+                                "openai_image_attempts": attempts,
+                            },
+                        ) from exc
+                    raise
+
+                attempts.append(
+                    self._build_openai_image_attempt_record(
+                        attempt=attempt,
+                        status="failed",
+                        timeout_seconds=timeout_seconds,
+                        input_images=input_images,
+                        error_type=exc.detail.get("error") if isinstance(exc.detail, dict) else exc.__class__.__name__,
+                        message=self._shorten_error_detail(exc.detail),
+                    )
+                )
+                warnings.append(
+                    f"OpenAI {request_kind} attempt {attempt} failed with {exc.__class__.__name__}; retrying."
+                )
+                if delay_seconds:
+                    time.sleep(delay_seconds)
+                continue
+            except (requests.ReadTimeout, requests.Timeout, requests.ConnectionError, TimeoutError) as exc:
+                error_type = exc.__class__.__name__
+                attempts.append(
+                    self._build_openai_image_attempt_record(
+                        attempt=attempt,
+                        status="failed",
+                        timeout_seconds=timeout_seconds,
+                        input_images=input_images,
+                        error_type=error_type,
+                        message=str(exc)[:200],
+                    )
+                )
+                if attempt >= max_attempts:
+                    raise HTTPException(
+                        status_code=504,
+                        detail={
+                            "error": "openai_image_timeout",
+                            "message": "OpenAI image generation timed out after retry attempts.",
+                            "details": {
+                                "attempts": len(attempts),
+                                "timeout_seconds": timeout_seconds,
+                            },
+                            "openai_image_attempts": attempts,
+                        },
+                    ) from exc
+                warnings.append(
+                    f"OpenAI {request_kind} attempt {attempt} failed with {error_type}; retrying."
+                )
+                if delay_seconds:
+                    time.sleep(delay_seconds)
+
+        raise HTTPException(
+            status_code=504,
+            detail={
+                "error": "openai_image_timeout",
+                "message": "OpenAI image generation timed out after retry attempts.",
+                "details": {
+                    "attempts": len(attempts),
+                    "timeout_seconds": timeout_seconds,
+                },
+                "openai_image_attempts": attempts,
+            },
+        )
+
+    @staticmethod
+    def _is_retryable_openai_image_exception(exc: Exception) -> bool:
+        return isinstance(
+            exc,
+            (
+                requests.Timeout,
+                requests.ReadTimeout,
+                requests.ConnectionError,
+                TimeoutError,
+            ),
+        )
+
+    @staticmethod
+    def _is_retryable_openai_image_http_exception(exc: HTTPException) -> bool:
+        detail = exc.detail
+        if isinstance(detail, dict):
+            error = str(detail.get("error") or "").lower()
+            message = str(detail.get("message") or "").lower()
+            return error == "openai_image_timeout" or "timed out" in message or "readtimeout" in message
+        message = str(detail or "").lower()
+        return "timed out" in message or "readtimeout" in message or "timeouterror" in message
+
+    @staticmethod
+    def _shorten_error_detail(detail) -> str:
+        if isinstance(detail, dict):
+            message = detail.get("message") or detail.get("detail") or detail.get("error")
+            return str(message or "HTTP error")[:200]
+        return str(detail or "HTTP error")[:200]
+
+    def _build_openai_image_attempt_record(
+        self,
+        *,
+        attempt: int,
+        status: str,
+        timeout_seconds: int,
+        input_images: list[dict],
+        error_type: str | None = None,
+        message: str | None = None,
+    ) -> dict:
+        return {
+            "attempt": attempt,
+            "status": status,
+            "error_type": error_type,
+            "message": message,
+            "timeout_seconds": timeout_seconds,
+            "input_image_count": len(input_images),
+            "input_images": [
+                {
+                    "path": str(item.get("path") or ""),
+                    "filename": str(item.get("filename") or Path(str(item.get("path") or "")).name),
+                    "mime_type": str(item.get("mime_type") or ""),
+                    "size_bytes": item.get("size_bytes"),
+                }
+                for item in input_images
+            ],
+        }
 
     def _resolve_selected_reference_images(self, run_id: str, selected_reference_images: list[dict]) -> list[dict]:
         resolved: list[dict] = []
@@ -630,6 +848,7 @@ class ImageGenerationDraftService:
         errors: list[str],
         selected_reference_images: list[dict],
         openai_input_images: list[dict],
+        openai_image_attempts: list[dict],
         draft_status: str,
     ) -> ImageGenerationDraftArtifact:
         usage = self._extract_usage(openai_response)
@@ -701,6 +920,7 @@ class ImageGenerationDraftService:
             interior_reference_count=preview.interior_reference_count,
             selected_interior_filenames=preview.selected_interior_filenames,
             interior_guidance_summary=preview.interior_guidance_summary,
+            openai_image_attempts=openai_image_attempts,
             openai_input_images=[
                 {
                     "path": str(item.get("path") or ""),
@@ -733,6 +953,114 @@ class ImageGenerationDraftService:
                 json.dump(artifact.model_dump(mode="json"), output_file, ensure_ascii=False, indent=2)
         except OSError as exc:
             raise HTTPException(status_code=500, detail="failed to write image_generation_draft artifact") from exc
+
+    def _write_failed_image_generation_draft_artifact(
+        self,
+        run_id: str,
+        preview: ImageGenerationRequestPreviewArtifact,
+        payload: dict,
+        selected_reference_images: list[dict],
+        openai_input_images: list[dict],
+        exc: HTTPException,
+    ) -> None:
+        path = self._artifacts_dir(run_id) / "image_generation_draft_failed.json"
+        detail = exc.detail if isinstance(exc.detail, dict) else {}
+        attempts = detail.get("openai_image_attempts") if isinstance(detail, dict) else []
+        payload = {
+            "schema_version": "image_generation_draft_failed.v1",
+            "run_id": run_id,
+            "generated_at": datetime.now(timezone.utc).isoformat(),
+            "draft_status": "failed",
+            "provider": {
+                "provider_name": "openai",
+                "model": payload.get("model"),
+                "api_call_performed": True,
+                "request_sent": True,
+                "prompt_mode": self._get_prompt_mode(preview),
+                "strict_layout_test_enabled": self._get_prompt_mode(preview)
+                in {"strict_layout_test", "strict_layout_with_interior_guidance"},
+            },
+            "source": {
+                "image_generation_request_preview_artifact": self._relative_artifact_path(run_id, "image_generation_request_preview.json"),
+                "prompt_package_artifact": self._relative_artifact_path(run_id, "prompt_package.json"),
+                "primary_structure_reference": str(payload.get("primary_structure_reference") or "normalized_floorplan.png"),
+            },
+            "request": {
+                "provider_size": payload.get("size"),
+                "final_delivery_size": str(
+                    preview.target_output.get("final_delivery_size") or self.settings.openai_image_final_output_size
+                ),
+                "quality": payload.get("quality"),
+                "output_format": payload.get("output_format"),
+                "prompt_mode": self._get_prompt_mode(preview),
+                "strict_layout_test_enabled": self._get_prompt_mode(preview)
+                in {"strict_layout_test", "strict_layout_with_interior_guidance"},
+                "primary_structure_reference": str(payload.get("primary_structure_reference") or "normalized_floorplan.png"),
+                "layout_preservation_priority": str(payload.get("layout_preservation_priority") or "high"),
+                "long_prompt_disabled": bool(payload.get("long_prompt_disabled")),
+                "selected_reference_images": selected_reference_images,
+                "prompt_char_count": len(payload.get("prompt") or ""),
+            },
+            "outputs": {},
+            "postprocess": {},
+            "usage": {},
+            "quality": {
+                "needs_human_review": True,
+                "layout_accuracy_not_verified": True,
+                "structure_guard_prompt_used": True,
+                "image_generation_done": False,
+                "watercolor_rendering_done": False,
+                "ready_for_visual_qa": False,
+            },
+            "reference_selection_path": preview.reference_selection_path,
+            "selected_reference_images": selected_reference_images,
+            "interior_reference_count": preview.interior_reference_count,
+            "selected_interior_filenames": preview.selected_interior_filenames,
+            "interior_guidance_summary": preview.interior_guidance_summary,
+            "openai_image_attempts": attempts if isinstance(attempts, list) else [],
+            "openai_input_images": [
+                {
+                    "path": str(item.get("path") or ""),
+                    "filename": str(item.get("filename") or Path(str(item.get("path") or "")).name),
+                    "mime_type": str(item.get("mime_type") or ""),
+                    "role": str(item.get("role") or "reference_image"),
+                }
+                for item in openai_input_images
+            ],
+            "cloudinary": {
+                "enabled": bool(self.settings.cloudinary_enabled),
+                "draft": {
+                    "enabled": bool(self.settings.cloudinary_enabled),
+                    "uploaded": False,
+                    "reason": "openai_image_generation_failed",
+                },
+                "raw_draft": {
+                    "enabled": bool(self.settings.cloudinary_enabled),
+                    "uploaded": False,
+                    "reason": "openai_image_generation_failed",
+                },
+                "warnings": [],
+            },
+            "public_output_url": None,
+            "cloudinary_url": None,
+            "output_url": None,
+            "preview_url": None,
+            "warnings": [
+                "OpenAI image generation failed before output could be produced.",
+            ],
+            "errors": [
+                {
+                    "error": str(detail.get("error") or "openai_image_timeout"),
+                    "message": str(detail.get("message") or exc.detail or "OpenAI image generation failed."),
+                    "details": detail.get("details") if isinstance(detail, dict) else {},
+                }
+            ],
+        }
+        try:
+            with path.open("w", encoding="utf-8") as output_file:
+                json.dump(payload, output_file, ensure_ascii=False, indent=2)
+        except OSError:
+            return
 
     def build_metadata_updates(self, metadata: RunMetadata, artifact: ImageGenerationDraftArtifact) -> dict:
         now = datetime.now(timezone.utc)

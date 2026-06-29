@@ -9,7 +9,7 @@ from app.config import get_settings
 
 
 class CloudinaryStorageService:
-    SUPPORTED_ASSET_KINDS = {"draft", "raw_draft", "final"}
+    SUPPORTED_ASSET_KINDS = {"draft", "raw_draft", "final", "regenerated"}
 
     def __init__(self) -> None:
         self.settings = get_settings()

@@ -1,0 +1,22 @@
+﻿{
+  "feedback_status": "needs_regeneration",
+  "target_image": "latest_draft",
+  "issues": [
+    {
+      "issue_type": "wrong_room_role",
+      "severity": "high",
+      "description": "Sofa and TV should be in the western-style lounge room, not in the main living/dining area."
+    },
+    {
+      "issue_type": "dining_wrong_room",
+      "severity": "high",
+      "description": "Dining table belongs in the main living/dining area."
+    },
+    {
+      "issue_type": "too_many_beds",
+      "severity": "medium",
+      "description": "The bedroom should not show more than two beds."
+    }
+  ],
+  "freeform_feedback": "Manual QA feedback for regeneration planning."
+}

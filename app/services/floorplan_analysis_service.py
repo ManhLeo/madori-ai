@@ -13,7 +13,7 @@ from app.schemas.run import (
     RunMetadata,
     SemanticSourceImage,
 )
-from app.services.vision_analyzer import VisionAnalyzer
+from app.services.vision_analyzer import OpenAIJSONParseError, VisionAnalyzer
 
 
 class FloorplanAnalysisService:
@@ -33,11 +33,55 @@ class FloorplanAnalysisService:
         if not normalized_path.exists():
             raise HTTPException(status_code=400, detail="normalized_floorplan image is missing")
 
-        analysis, raw_payload = self.vision_analyzer.analyze_floorplan_semantic_with_raw(normalized_path)
+        artifacts_dir = self._artifacts_dir(metadata, run_dir)
+        artifacts_dir.mkdir(parents=True, exist_ok=True)
+        try:
+            analysis, raw_payload = self.vision_analyzer.analyze_floorplan_semantic_with_raw(
+                normalized_path,
+                run_id=metadata.run_id,
+                artifacts_dir=artifacts_dir,
+            )
+        except OpenAIJSONParseError as exc:
+            raw_payload = exc.raw_payload or {
+                "run_id": metadata.run_id,
+                "provider": "openai",
+                "model": None,
+                "mode": "semantic_only",
+                "analysis_type": "floorplan_semantic",
+                "attempts": getattr(exc, "attempts", []),
+                "warnings": [],
+                "errors": [
+                    {
+                        "error": "openai_invalid_json",
+                        "message": str(exc),
+                        "details": {
+                            "attempts": len(getattr(exc, "attempts", [])),
+                            "likely_truncated": getattr(exc, "likely_truncated", False),
+                        },
+                    }
+                ],
+            }
+            raw_payload["run_id"] = metadata.run_id
+            self._write_json(artifacts_dir / "floorplan_analysis_raw.json", raw_payload)
+            raise HTTPException(
+                status_code=502,
+                detail={
+                    "error": "openai_invalid_json",
+                    "message": "OpenAI floorplan semantic analysis returned invalid JSON after retry.",
+                    "details": {
+                        "attempts": len(raw_payload.get("attempts") or []),
+                        "likely_truncated": any(
+                            bool(item.get("likely_truncated")) for item in (raw_payload.get("attempts") or [])
+                        ),
+                    },
+                },
+            ) from exc
         provider = str(raw_payload.get("provider") or "unknown")
         model = raw_payload.get("model")
         warnings: list[str] = []
         errors: list[str] = []
+        raw_payload = dict(raw_payload)
+        raw_payload["run_id"] = metadata.run_id
 
         artifact = FloorplanSemanticAnalysisArtifact(
             run_id=metadata.run_id,
@@ -57,8 +101,6 @@ class FloorplanAnalysisService:
             errors=errors,
         )
 
-        artifacts_dir = self._artifacts_dir(metadata, run_dir)
-        artifacts_dir.mkdir(parents=True, exist_ok=True)
         self._write_json(artifacts_dir / "floorplan_analysis.json", artifact.model_dump(mode="json"))
         self._write_json(artifacts_dir / "floorplan_analysis_raw.json", raw_payload)
         return artifact

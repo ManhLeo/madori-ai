@@ -1,0 +1,12 @@
+﻿{
+  "feedback_status": "needs_regeneration",
+  "target_image": "latest_draft",
+  "issues": [
+    {
+      "issue_type": "washing_machine_wrong_position",
+      "severity": "high",
+      "description": "The washing machine should be placed in the Wash Room at the Wash / 洗 mark."
+    }
+  ],
+  "freeform_feedback": "Use the correct Wash Room marker guidance."
+}

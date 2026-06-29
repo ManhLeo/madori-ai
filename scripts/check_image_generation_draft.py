@@ -38,6 +38,26 @@ def main() -> int:
             "ready_for_visual_qa": quality.get("ready_for_visual_qa"),
         }
     )
+    print("openai image attempts:")
+    for item in payload.get("openai_image_attempts") or []:
+        if not isinstance(item, dict):
+            print(" - invalid attempt record")
+            continue
+        print(
+            " - attempt {attempt}: status={status}, error_type={error_type}, message={message}, timeout_seconds={timeout_seconds}, input_image_count={input_image_count}".format(
+                attempt=item.get("attempt"),
+                status=item.get("status"),
+                error_type=item.get("error_type"),
+                message=item.get("message"),
+                timeout_seconds=item.get("timeout_seconds"),
+                input_image_count=item.get("input_image_count"),
+            )
+        )
+        for input_image in item.get("input_images") or []:
+            if isinstance(input_image, dict):
+                print(
+                    f"   - {input_image.get('filename')} [{input_image.get('mime_type')}] size={input_image.get('size_bytes')} path={input_image.get('path')}"
+                )
     print("\n--- warnings ---\n")
     print(json.dumps(payload.get("warnings", []), ensure_ascii=False, indent=2))
     print("\n--- errors ---\n")

@@ -9,9 +9,11 @@ from fastapi import HTTPException, UploadFile
 
 from app.schemas.run import (
     AnalysisSummary,
+    FinalOutputSummary,
     FurniturePlacementSummary,
     FurniturePlacementValidationSummary,
     ImageGenerationDraftSummary,
+    RegenerationSummary,
     InteriorAnalysisSummary,
     InteriorValidationSummary,
     LayoutSummary,
@@ -20,6 +22,7 @@ from app.schemas.run import (
     OutputRequirements,
     PipelineSummary,
     PromptPackageSummary,
+    QAFeedbackSummary,
     ProcessingFlags,
     RoomFunctionAssignmentSummary,
     RenderPlanSummary,
@@ -30,6 +33,7 @@ from app.schemas.run import (
     StructureLockedCompositeSummary,
     StyleReferenceGroups,
     UploadedFileMetadata,
+    VisualQASummary,
     WorkspacePaths,
 )
 from app.services.file_service import FileService, SavedUpload
@@ -336,6 +340,14 @@ class RunService:
                 "prompt_package_summary": summary.prompt_package_summary if summary.prompt_package_summary is None or isinstance(summary.prompt_package_summary, PromptPackageSummary) else PromptPackageSummary.model_validate(summary.prompt_package_summary),
                 "image_generation_request_preview_summary": summary.image_generation_request_preview_summary if summary.image_generation_request_preview_summary is None or isinstance(summary.image_generation_request_preview_summary, ImageGenerationRequestPreviewSummary) else ImageGenerationRequestPreviewSummary.model_validate(summary.image_generation_request_preview_summary),
                 "image_generation_draft_summary": summary.image_generation_draft_summary if summary.image_generation_draft_summary is None or isinstance(summary.image_generation_draft_summary, ImageGenerationDraftSummary) else ImageGenerationDraftSummary.model_validate(summary.image_generation_draft_summary),
+                "visual_qa_summary": summary.visual_qa_summary if summary.visual_qa_summary is None or isinstance(summary.visual_qa_summary, VisualQASummary) else VisualQASummary.model_validate(summary.visual_qa_summary),
+                "qa_feedback_path": summary.qa_feedback_path,
+                "qa_feedback_summary": summary.qa_feedback_summary if summary.qa_feedback_summary is None or isinstance(summary.qa_feedback_summary, QAFeedbackSummary) else QAFeedbackSummary.model_validate(summary.qa_feedback_summary),
+                "final_output_path": summary.final_output_path,
+                "final_output_summary": summary.final_output_summary if summary.final_output_summary is None or isinstance(summary.final_output_summary, FinalOutputSummary) else FinalOutputSummary.model_validate(summary.final_output_summary),
+                "latest_regeneration_path": summary.latest_regeneration_path,
+                "regeneration_summary": summary.regeneration_summary if summary.regeneration_summary is None or isinstance(summary.regeneration_summary, RegenerationSummary) else RegenerationSummary.model_validate(summary.regeneration_summary),
+                "public_output_url": summary.public_output_url or metadata.public_output_url,
                 "last_indexed_at": summary.generated_at,
             }
         )
@@ -499,6 +511,87 @@ class RunService:
                 "pipeline": updates.get("pipeline", metadata.pipeline),
                 "structure_locked_composite_path": updates.get("structure_locked_composite_path"),
                 "structure_locked_composite_summary": updates.get("structure_locked_composite_summary"),
+            }
+        )
+        metadata_path = self._safe_run_dir(metadata.run_id) / "run_metadata.json"
+        self._write_metadata(metadata_path, updated_metadata)
+        return updated_metadata
+
+    def apply_visual_qa_updates(
+        self,
+        metadata: RunMetadata,
+        updates: dict,
+    ) -> RunMetadata:
+        now = datetime.now(timezone.utc)
+        updated_metadata = metadata.model_copy(
+            update={
+                **updates,
+                "updated_at": updates.get("updated_at", now),
+                "processing": updates.get("processing", metadata.processing),
+                "visual_qa_report_path": updates.get("visual_qa_report_path"),
+                "visual_qa_summary": updates.get("visual_qa_summary"),
+            }
+        )
+        metadata_path = self._safe_run_dir(metadata.run_id) / "run_metadata.json"
+        self._write_metadata(metadata_path, updated_metadata)
+        return updated_metadata
+
+    def apply_final_output_updates(
+        self,
+        metadata: RunMetadata,
+        updates: dict,
+    ) -> RunMetadata:
+        now = datetime.now(timezone.utc)
+        updated_metadata = metadata.model_copy(
+            update={
+                **updates,
+                "updated_at": updates.get("updated_at", now),
+                "processing": updates.get("processing", metadata.processing),
+                "pipeline": updates.get("pipeline", metadata.pipeline),
+                "final_output_path": updates.get("final_output_path"),
+                "final_output_summary": updates.get("final_output_summary"),
+                "public_output_url": updates.get("public_output_url", metadata.public_output_url),
+            }
+        )
+        metadata_path = self._safe_run_dir(metadata.run_id) / "run_metadata.json"
+        self._write_metadata(metadata_path, updated_metadata)
+        return updated_metadata
+
+    def apply_qa_feedback_updates(
+        self,
+        metadata: RunMetadata,
+        updates: dict,
+    ) -> RunMetadata:
+        now = datetime.now(timezone.utc)
+        updated_metadata = metadata.model_copy(
+            update={
+                **updates,
+                "updated_at": updates.get("updated_at", now),
+                "processing": updates.get("processing", metadata.processing),
+                "pipeline": updates.get("pipeline", metadata.pipeline),
+                "qa_feedback_path": updates.get("qa_feedback_path"),
+                "qa_feedback_summary": updates.get("qa_feedback_summary"),
+            }
+        )
+        metadata_path = self._safe_run_dir(metadata.run_id) / "run_metadata.json"
+        self._write_metadata(metadata_path, updated_metadata)
+        return updated_metadata
+
+    def apply_regeneration_updates(
+        self,
+        metadata: RunMetadata,
+        updates: dict,
+    ) -> RunMetadata:
+        now = datetime.now(timezone.utc)
+        updated_metadata = metadata.model_copy(
+            update={
+                **updates,
+                "updated_at": updates.get("updated_at", now),
+                "processing": updates.get("processing", metadata.processing),
+                "pipeline": updates.get("pipeline", metadata.pipeline),
+                "latest_regeneration_path": updates.get("latest_regeneration_path"),
+                "regeneration_summary": updates.get("regeneration_summary"),
+                "public_output_url": updates.get("public_output_url", metadata.public_output_url),
             }
         )
         metadata_path = self._safe_run_dir(metadata.run_id) / "run_metadata.json"

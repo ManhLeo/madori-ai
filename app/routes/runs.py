@@ -4,6 +4,8 @@ from fastapi import APIRouter, File, HTTPException, UploadFile
 
 from app.config import get_settings
 from app.schemas.run import (
+    FinalOutputResponse,
+    FinalizeOutputRequest,
     FloorplanAnalysisValidatedArtifact,
     FloorplanPreprocessReport,
     FloorplanSemanticAnalysisArtifact,
@@ -19,15 +21,22 @@ from app.schemas.run import (
     LayoutValidationArtifact,
     PromptPackageArtifact,
     RenderPlanArtifact,
+    RegenerateWithFeedbackRequest,
+    RegenerationAttemptResponse,
     RoomFunctionAssignmentArtifact,
+    QAFeedbackRequest,
+    QAFeedbackResponse,
     RunArtifactIndex,
     RunCreateResponse,
     RunMetadataSummary,
     RunMetadataResponse,
     StructureLockedCompositeArtifact,
+    VisualQAReportResponse,
+    VisualQARequest,
 )
 from app.services.floorplan_analysis_service import FloorplanAnalysisService
 from app.services.floorplan_analysis_validation_service import FloorplanAnalysisValidationService
+from app.services.final_output_service import FinalOutputService
 from app.services.floorplan_preprocess_service import FloorplanPreprocessService
 from app.services.furniture_placement_service import FurniturePlacementService
 from app.services.furniture_placement_validation_service import FurniturePlacementValidationService
@@ -39,11 +48,14 @@ from app.services.layout_validation_service import LayoutValidationService
 from app.services.image_generation_request_preview_service import ImageGenerationRequestPreviewService
 from app.services.image_generation_draft_service import ImageGenerationDraftService
 from app.services.prompt_package_service import PromptPackageService
+from app.services.qa_feedback_service import QAFeedbackService
+from app.services.regeneration_service import RegenerationService
 from app.services.render_plan_service import RenderPlanService
 from app.services.room_function_assignment_service import RoomFunctionAssignmentService
 from app.services.run_index_service import RunIndexService
 from app.services.run_service import RunService, to_create_response
 from app.services.structure_locked_composite_renderer import StructureLockedCompositeRenderer
+from app.services.visual_qa_service import VisualQAService
 
 
 router = APIRouter(prefix="/api", tags=["phase-1-runs"])
@@ -402,3 +414,81 @@ def get_structure_locked_composite(run_id: str) -> StructureLockedCompositeArtif
     settings = get_settings()
     composite_service = StructureLockedCompositeRenderer(settings.storage_dir, settings.storage_runs_dir)
     return composite_service.load_structure_locked_composite(run_id)
+
+
+@router.post("/runs/{run_id}/visual-qa", response_model=VisualQAReportResponse)
+def create_visual_qa_report(run_id: str, request: VisualQARequest) -> VisualQAReportResponse:
+    settings = get_settings()
+    run_service = RunService(settings.storage_runs_dir)
+    metadata = run_service.load_metadata(run_id)
+    visual_qa_service = VisualQAService(settings.storage_dir, settings.storage_runs_dir)
+    artifact = visual_qa_service.create_visual_qa_report(metadata, request)
+    metadata_updates = visual_qa_service.build_metadata_updates(metadata, artifact)
+    run_service.apply_visual_qa_updates(metadata, metadata_updates)
+    return artifact
+
+
+@router.get("/runs/{run_id}/artifacts/visual_qa_report", response_model=VisualQAReportResponse)
+def get_visual_qa_report(run_id: str) -> VisualQAReportResponse:
+    settings = get_settings()
+    visual_qa_service = VisualQAService(settings.storage_dir, settings.storage_runs_dir)
+    return visual_qa_service.load_visual_qa_report(run_id)
+
+
+@router.post("/runs/{run_id}/finalize-output", response_model=FinalOutputResponse)
+def finalize_output(run_id: str, request: FinalizeOutputRequest | None = None) -> FinalOutputResponse:
+    settings = get_settings()
+    run_service = RunService(settings.storage_runs_dir)
+    metadata = run_service.load_metadata(run_id)
+    final_output_service = FinalOutputService(settings.storage_dir, settings.storage_runs_dir)
+    artifact = final_output_service.finalize_output(metadata, request or FinalizeOutputRequest())
+    metadata_updates = final_output_service.build_metadata_updates(metadata, artifact)
+    run_service.apply_final_output_updates(metadata, metadata_updates)
+    return artifact
+
+
+@router.get("/runs/{run_id}/artifacts/final_output", response_model=FinalOutputResponse)
+def get_final_output(run_id: str) -> FinalOutputResponse:
+    settings = get_settings()
+    final_output_service = FinalOutputService(settings.storage_dir, settings.storage_runs_dir)
+    return final_output_service.load_final_output(run_id)
+
+
+@router.post("/runs/{run_id}/qa-feedback", response_model=QAFeedbackResponse)
+def create_qa_feedback(run_id: str, request: QAFeedbackRequest) -> QAFeedbackResponse:
+    settings = get_settings()
+    run_service = RunService(settings.storage_runs_dir)
+    metadata = run_service.load_metadata(run_id)
+    qa_feedback_service = QAFeedbackService(settings.storage_dir, settings.storage_runs_dir)
+    artifact = qa_feedback_service.create_qa_feedback(metadata, request)
+    metadata_updates = qa_feedback_service.build_metadata_updates(metadata, artifact)
+    run_service.apply_qa_feedback_updates(metadata, metadata_updates)
+    return artifact
+
+
+@router.get("/runs/{run_id}/artifacts/qa_feedback", response_model=QAFeedbackResponse)
+def get_qa_feedback(run_id: str) -> QAFeedbackResponse:
+    settings = get_settings()
+    qa_feedback_service = QAFeedbackService(settings.storage_dir, settings.storage_runs_dir)
+    return qa_feedback_service.load_qa_feedback(run_id)
+
+
+@router.post("/runs/{run_id}/regenerate-with-feedback", response_model=RegenerationAttemptResponse)
+def regenerate_with_feedback(run_id: str, request: RegenerateWithFeedbackRequest) -> RegenerationAttemptResponse:
+    settings = get_settings()
+    run_service = RunService(settings.storage_runs_dir)
+    metadata = run_service.load_metadata(run_id)
+    regeneration_service = RegenerationService(settings.storage_dir, settings.storage_runs_dir)
+    artifact = regeneration_service.regenerate_with_feedback(metadata, request)
+    metadata_updates = regeneration_service.build_metadata_updates(metadata, artifact)
+    run_service.apply_regeneration_updates(metadata, metadata_updates)
+    return artifact
+
+
+@router.get("/runs/{run_id}/artifacts/latest_regeneration", response_model=RegenerationAttemptResponse)
+def get_latest_regeneration(run_id: str) -> RegenerationAttemptResponse:
+    settings = get_settings()
+    run_service = RunService(settings.storage_runs_dir)
+    metadata = run_service.load_metadata(run_id)
+    regeneration_service = RegenerationService(settings.storage_dir, settings.storage_runs_dir)
+    return regeneration_service.load_latest_regeneration(run_id, metadata)

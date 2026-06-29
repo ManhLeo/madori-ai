@@ -27,8 +27,7 @@ Output hosting:
 - Cloudinary optional, storage-only
 
 Removed from the active flow:
-- FluxAPI
-- fal.ai
+- older third-party image providers
 - Gemini analysis
 - OCR
 - legacy `/api/generate`
@@ -44,6 +43,30 @@ OPENAI_API_KEY=...
 ```
 
 Gemini is deprecated in this project and is not part of the active flow.
+
+## Phase 7 Output Workflow
+
+Phase 7 uses the staged runs flow only:
+
+`Draft -> Visual QA -> Finalize Output`
+
+- The frontend uses staged `/api/runs` endpoints only.
+- `POST /api/runs/{run_id}/visual-qa` records manual review.
+- `POST /api/runs/{run_id}/finalize-output` creates the local final output image.
+- When Cloudinary is enabled, the finalized frontend view should prefer the returned hosted final URL.
+- Local `/storage/...` URLs remain the fallback for preview and debugging.
+
+## Phase 8 QA Feedback and Regeneration
+
+QA Feedback -> Regenerate with Feedback
+
+- regeneration outputs are versioned
+- original draft/final outputs are not overwritten
+- Cloudinary regenerated URL is preferred for deployed frontend
+- local `/storage` URL remains fallback
+- staged `/api/runs` only
+- OpenAI remains the only generation provider
+- Cloudinary is storage/hosting only
 
 ## Phase 1 Upload Runs
 
